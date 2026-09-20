@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import modelAsset from "@/assets/mai_shiranui_kof_xv.glb.asset.json";
-import { createVoxelWorld } from "./voxelWorld";
+import { createVoxelWorld, type BlockType } from "./voxelWorld";
 
 const MODEL_URL = modelAsset.url;
 
@@ -45,12 +45,20 @@ function findBone(root: THREE.Object3D, partial: string) {
 }
 
 
+const HOTBAR_SIZE = 9;
+const STACK_LIMIT = 64;
+type Slot = { type: BlockType; count: number } | null;
+const BLOCK_LABEL: Record<BlockType, string> = { grass: "Grass Block" };
+
 export default function TerrainGame() {
   const hostRef = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState(false);
   const [moving, setMoving] = useState(false);
   const [attackLabel, setAttackLabel] = useState<string | null>(null);
-  const [firstPerson, setFirstPerson] = useState(false);
+  const [slots, setSlots] = useState<Slot[]>(() => Array.from({ length: HOTBAR_SIZE }, () => null));
+  const [selectedSlot, setSelectedSlot] = useState(0);
+  const slotsRef = useRef<Slot[]>(slots);
+  const selectedRef = useRef(0);
 
 
   useEffect(() => {
@@ -61,7 +69,7 @@ export default function TerrainGame() {
     scene.background = new THREE.Color(0xa8c5ce);
     scene.fog = new THREE.FogExp2(0xa8c5ce, 0.012);
 
-    const camera = new THREE.PerspectiveCamera(52, host.clientWidth / host.clientHeight, 0.1, 300);
+    const camera = new THREE.PerspectiveCamera(52, host.clientWidth / host.clientHeight, 0.06, 300);
     camera.position.set(0, 2.4, 5.4);
 
     // ?lowfx renders without shadows for low-power/software renderers.
@@ -89,6 +97,33 @@ export default function TerrainGame() {
     scene.add(sun);
     const world = createVoxelWorld(scene);
 
+    // --- inventory -----------------------------------------------------------
+    const syncSlots = () => setSlots([...slotsRef.current]);
+    const addToInventory = (type: BlockType) => {
+      const list = slotsRef.current;
+      const stack = list.findIndex((slot) => slot?.type === type && slot.count < STACK_LIMIT);
+      if (stack >= 0) {
+        list[stack] = { type, count: list[stack]!.count + 1 };
+        syncSlots();
+        return;
+      }
+      const empty = list.findIndex((slot) => slot === null);
+      if (empty >= 0) {
+        list[empty] = { type, count: 1 };
+        syncSlots();
+      }
+    };
+    const takeFromInventory = (index: number) => {
+      const slot = slotsRef.current[index];
+      if (!slot) return false;
+      const next = slot.count - 1;
+      slotsRef.current[index] = next > 0 ? { type: slot.type, count: next } : null;
+      syncSlots();
+      return true;
+    };
+    const lastAimOrigin = new THREE.Vector3();
+    const lastAimDirection = new THREE.Vector3(0, 0, 1);
+
     const keys: KeyState = {};
     const character = new THREE.Group();
     character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
@@ -99,12 +134,15 @@ export default function TerrainGame() {
     let walkTime = 0;
     let verticalVelocity = 0;
     let grounded = true;
+    let visualStepOffset = 0;
+    let landingImpact = 0;
+    let airborneBlend = 0;
     let cameraYaw = 0;
     let cameraPitch = 0.12;
     let cameraDistance = 4.2;
     let firstPersonView = false;
-    // Blocks taller than this above the feet must be jumped, not stepped onto.
-    const STEP_HEIGHT = 0.55;
+    // A full voxel can be stepped onto; the model eases up visually below.
+    const STEP_HEIGHT = 1.05;
     type AttackMode = "punch" | "combo" | "kick";
     type PoseMap = Map<THREE.Object3D, THREE.Quaternion>;
     const ATTACK_DURATIONS: Record<AttackMode, number> = { punch: 0.72, combo: 1.3, kick: 0.9 };
@@ -124,6 +162,7 @@ export default function TerrainGame() {
     let jabStrikePose: PoseMap | undefined;
     let kickWindupPose: PoseMap | undefined;
     let kickStrikePose: PoseMap | undefined;
+    let airbornePose: PoseMap | undefined;
 
     let previousSpeed = 0;
     let previousVerticalVelocity = 0;
@@ -264,6 +303,18 @@ export default function TerrainGame() {
         [bones.rightLowerLeg, () => new THREE.Vector3(0, 0.05, 1)],
       ]);
 
+      // Airborne balance pose: arms spread horizontally and legs opened apart.
+      airbornePose = capturePose([
+        [bones.leftUpperArm, (_d, side) => new THREE.Vector3(side, 0.04, 0.02)],
+        [bones.rightUpperArm, (_d, side) => new THREE.Vector3(side, 0.04, 0.02)],
+        [bones.leftLowerArm, (_d, side) => new THREE.Vector3(side, -0.02, 0.02)],
+        [bones.rightLowerArm, (_d, side) => new THREE.Vector3(side, -0.02, 0.02)],
+        [bones.leftUpperLeg, () => new THREE.Vector3(-0.58, -0.81, 0.05)],
+        [bones.rightUpperLeg, () => new THREE.Vector3(0.58, -0.81, 0.05)],
+        [bones.leftLowerLeg, () => new THREE.Vector3(-0.2, -0.97, 0.08)],
+        [bones.rightLowerLeg, () => new THREE.Vector3(0.2, -0.97, 0.08)],
+      ]);
+
       loadedModel.traverse((node) => {
         const isHair = /Hair\d.*Sec/.test(node.name);
         const isChest = /Bust0[12]_Sec/.test(node.name);
@@ -283,16 +334,16 @@ export default function TerrainGame() {
           const isRoot = node.name.includes("Sec_Root");
           const settledRest = node.quaternion.clone();
 
-          // Pull flexible back ornaments toward world-down while preserving
-          // their authored spread. This prevents unanimated chains from
-          // hovering horizontally behind the character.
-          if (isAccessory && isRoot && node.parent) {
+          // Set flexible ornament roots toward world-down while preserving
+          // their authored spread, keeping front cloth close to the body.
+          if ((isAccessory || isCloth) && isRoot && node.parent) {
             const childBone = node.children.find((child) => (child as THREE.Bone).isBone);
             if (childBone) {
               loadedModel.updateMatrixWorld(true);
               const origin = node.getWorldPosition(new THREE.Vector3());
               const direction = childBone.getWorldPosition(new THREE.Vector3()).sub(origin).normalize();
-              const target = direction.clone().lerp(new THREE.Vector3(0, -1, 0), 0.58).normalize();
+              const downwardBias = isCloth ? 0.82 : 0.58;
+              const target = direction.clone().lerp(new THREE.Vector3(0, -1, 0), downwardBias).normalize();
               const worldDelta = new THREE.Quaternion().setFromUnitVectors(direction, target);
               const parentWorld = node.parent.getWorldQuaternion(new THREE.Quaternion());
               settledRest.copy(parentWorld).invert().multiply(worldDelta).multiply(parentWorld).multiply(node.quaternion);
@@ -329,13 +380,18 @@ export default function TerrainGame() {
       keys[event.code] = true;
       if (event.code === "Quote") {
         firstPersonView = !firstPersonView;
-        character.visible = !firstPersonView;
         cameraPitch = THREE.MathUtils.clamp(cameraPitch, -1.2, 1.2);
-        setFirstPerson(firstPersonView);
       }
       if (event.code === "Space" && grounded) {
         verticalVelocity = 5.4;
         grounded = false;
+      }
+      // Number keys pick a hotbar slot.
+      const digit = /^Digit([1-9])$/.exec(event.code);
+      if (digit) {
+        const index = Number(digit[1]) - 1;
+        selectedRef.current = index;
+        setSelectedSlot(index);
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -346,6 +402,19 @@ export default function TerrainGame() {
         renderer.domElement.requestPointerLock();
       }
       if (event.button === 0) miningHeld = true;
+      // Right click places the selected block when the hotbar slot holds one.
+      if (event.button === 2 && slotsRef.current[selectedRef.current]) {
+        const placed = world.placeBlock(
+          lastAimOrigin,
+          lastAimDirection,
+          firstPersonView ? 5.5 : 3.6,
+          character.position,
+        );
+        if (placed) {
+          takeFromInventory(selectedRef.current);
+          return;
+        }
+      }
       if (attackTime > 0) return;
       if (event.button === 0) {
         attackMode = event.detail >= 2 ? "combo" : "punch";
@@ -432,13 +501,19 @@ export default function TerrainGame() {
       character.position.y += verticalVelocity * delta;
       const groundY = world.groundHeight(character.position.x, character.position.z);
       if (character.position.y <= groundY) {
+        const heightCorrection = groundY - character.position.y;
+        if (grounded && heightCorrection > 0.08) {
+          visualStepOffset -= Math.min(heightCorrection, STEP_HEIGHT);
+        } else if (!grounded && verticalVelocity < -2.2) {
+          landingImpact = THREE.MathUtils.clamp(-verticalVelocity - 2.2, 0, 8);
+        }
         character.position.y = groundY;
         verticalVelocity = 0;
         grounded = true;
       } else {
         grounded = false;
       }
-      world.update(delta);
+      world.update(delta, character.position, addToInventory);
 
 
       locomotionBlend = THREE.MathUtils.lerp(locomotionBlend, speed > 0 ? 1 : 0, 1 - Math.exp(-delta * (speed > 0 ? 9 : 7)));
@@ -535,12 +610,28 @@ export default function TerrainGame() {
         });
       }
 
+      airborneBlend = THREE.MathUtils.lerp(
+        airborneBlend,
+        grounded ? 0 : 1,
+        1 - Math.exp(-delta * (grounded ? 12 : 9)),
+      );
+      if (airbornePose && airborneBlend > 0.001) {
+        airbornePose.forEach((quaternion, bone) => {
+          bone.quaternion.slerp(quaternion, airborneBlend);
+        });
+      }
+
       setBoneRotation(bones.hips, settle + leanBack * 0.4, gait * 0.045 * locomotion + twist * 0.5, Math.cos(walkTime) * 0.032 * locomotion + idleSway * 0.018);
       setBoneRotation(bones.spine, -settle * 0.5 + leanBack, -gait * 0.032 * locomotion + twist * 0.7, -Math.cos(walkTime) * 0.018 * locomotion - idleSway * 0.012);
       setBoneRotation(bones.chest, settle * 0.65, Math.sin(walkTime) * 0.025 * locomotion + twist * 0.5, idleSway * 0.007);
       setBoneRotation(bones.head, -settle * 0.35, twist * 0.3, -idleSway * 0.006);
 
-      if (model) model.position.y = modelBaseY + (speed > 0 ? Math.abs(Math.sin(walkTime * 2)) * 0.024 * locomotion : settle * 0.16);
+      visualStepOffset = THREE.MathUtils.lerp(visualStepOffset, 0, 1 - Math.exp(-delta * 11));
+      if (model) {
+        model.position.y = modelBaseY
+          + visualStepOffset
+          + (speed > 0 ? Math.abs(Math.sin(walkTime * 2)) * 0.024 * locomotion : settle * 0.16);
+      }
 
       const acceleration = (speed - previousSpeed) / Math.max(delta, 0.001);
       previousSpeed = THREE.MathUtils.lerp(previousSpeed, speed, Math.min(1, delta * 8));
@@ -572,6 +663,9 @@ export default function TerrainGame() {
         ) * spring.weight;
         const stiffness = isChest ? 23 : isHair ? 20 : isButt ? 40 : isAccessory ? 28 : 34;
         const damping = isChest ? 2.5 : isHair ? 3.1 : isButt ? 5.2 : isAccessory ? 6.4 : 7.2;
+        if (isChest && landingImpact > 0) {
+          spring.velocityX += landingImpact * 0.16 * spring.weight;
+        }
         spring.velocityX += (targetX - spring.valueX) * stiffness * delta;
         spring.velocityZ += (targetZ - spring.valueZ) * stiffness * delta;
         spring.velocityX *= Math.exp(-damping * delta);
@@ -588,11 +682,13 @@ export default function TerrainGame() {
           new THREE.Quaternion().setFromEuler(new THREE.Euler(spring.valueX + gaitOffset, 0, spring.valueZ)),
         );
       });
+      landingImpact = 0;
 
       const target = character.position.clone().add(new THREE.Vector3(0, 1.05, 0));
       if (firstPersonView) {
-        // Eye-level camera looking along the aim direction.
+        // Place the view just ahead of the face so looking down reveals the body.
         const eye = character.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+        eye.add(new THREE.Vector3(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw)).multiplyScalar(0.13));
         camera.position.copy(eye);
         const look = eye.clone().add(new THREE.Vector3(
           -Math.sin(cameraYaw) * Math.cos(cameraPitch),
@@ -625,8 +721,10 @@ export default function TerrainGame() {
           .set(Math.sin(character.rotation.y), -0.3, Math.cos(character.rotation.y))
           .normalize();
       }
+      lastAimOrigin.copy(aimOrigin);
+      lastAimDirection.copy(aimDirection);
       const aimed = world.pickBlock(aimOrigin, aimDirection, firstPersonView ? 5.5 : 3.2);
-      world.highlightBlock(firstPersonView ? aimed : null);
+      world.highlightBlock(aimed);
       const sameBlock =
         aimed && miningBlock
           ? aimed[0] === miningBlock[0] && aimed[1] === miningBlock[1] && aimed[2] === miningBlock[2]
@@ -692,12 +790,10 @@ export default function TerrainGame() {
     <main className="relative h-dvh w-full overflow-hidden bg-background text-foreground">
       <div ref={hostRef} className="absolute inset-0" aria-label="Open 3D terrain game" />
 
-      {firstPerson ? (
-        <div className="crosshair" aria-hidden="true">
-          <span />
-          <span />
-        </div>
-      ) : null}
+      <div className="crosshair" aria-hidden="true">
+        <span />
+        <span />
+      </div>
 
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-5 sm:p-7">
@@ -711,19 +807,39 @@ export default function TerrainGame() {
         </div>
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between p-5 sm:p-7">
-        <div className="control-panel">
-          <div><kbd>WASD</kbd><span>Move</span></div>
-          <div><kbd>SHIFT</kbd><span>Sprint</span></div>
-          <div><kbd>SPACE</kbd><span>Jump</span></div>
-          <div><span className="mouse-icon" aria-hidden="true" /><span>Look / Scroll zoom</span></div>
-          <div><kbd>L-CLICK</kbd><span>Punch</span></div>
-          <div><kbd>HOLD L</kbd><span>Mine block</span></div>
-          <div><kbd>DBL-CLICK</kbd><span>Combo</span></div>
-          <div><kbd>R-CLICK</kbd><span>Kick</span></div>
-          <div><kbd>'</kbd><span>{firstPerson ? "Third person" : "First person"}</span></div>
-        </div>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-end p-5 sm:p-7">
         <div className="physics-badge"><span />SECONDARY MOTION</div>
+      </div>
+
+      <div className="hotbar-wrap">
+        <div className="hotbar" role="list" aria-label="Inventory hotbar">
+          {slots.map((slot, index) => (
+            <button
+              key={index}
+              type="button"
+              role="listitem"
+              className={index === selectedSlot ? "hotbar-slot is-active" : "hotbar-slot"}
+              onClick={() => {
+                selectedRef.current = index;
+                setSelectedSlot(index);
+              }}
+              aria-label={slot ? `${BLOCK_LABEL[slot.type]} x${slot.count}` : `Empty slot ${index + 1}`}
+            >
+              {slot ? (
+                <>
+                  <span className={`block-icon is-${slot.type}`} aria-hidden="true" />
+                  <span className="slot-count">{slot.count}</span>
+                </>
+              ) : null}
+              <span className="slot-index">{index + 1}</span>
+            </button>
+          ))}
+        </div>
+        <p className="hotbar-hint">
+          {slots[selectedSlot]
+            ? `${BLOCK_LABEL[slots[selectedSlot]!.type]} — right-click to place`
+            : "Mine blocks to collect them"}
+        </p>
       </div>
     </main>
   );
