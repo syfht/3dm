@@ -78,17 +78,29 @@ function grassTexture(kind: "top" | "side" | "dirt") {
 
 export type BlockCoord = [number, number, number];
 
+export type BlockType = "grass";
+
 export type VoxelWorld = {
   mesh: THREE.InstancedMesh;
   groundHeight: (x: number, z: number) => number;
   breakBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => boolean;
   pickBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => BlockCoord | null;
+  placeBlock: (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    reach: number,
+    playerPosition: THREE.Vector3,
+  ) => boolean;
   removeBlock: (block: BlockCoord) => void;
   showBreakProgress: (block: BlockCoord | null, progress: number) => void;
   highlightBlock: (block: BlockCoord | null) => void;
   cameraClearance: (target: THREE.Vector3, toCamera: THREE.Vector3) => number;
 
-  update: (delta: number) => void;
+  update: (
+    delta: number,
+    playerPosition?: THREE.Vector3,
+    onCollect?: (type: BlockType) => void,
+  ) => void;
   dispose: () => void;
 };
 
@@ -187,6 +199,24 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     return 0;
   };
 
+  // --- dropped block items (collectable pickups) -----------------------------
+  const dropGeometry = new THREE.BoxGeometry(0.32, 0.32, 0.32);
+  type Drop = { mesh: THREE.Mesh; velocity: THREE.Vector3; bob: number };
+  const drops: Drop[] = [];
+
+  const spawnDrop = (block: BlockCoord) => {
+    const piece = new THREE.Mesh(dropGeometry, materials);
+    piece.castShadow = true;
+    piece.position.set(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5);
+    piece.rotation.y = Math.random() * Math.PI;
+    scene.add(piece);
+    drops.push({
+      mesh: piece,
+      velocity: new THREE.Vector3((Math.random() - 0.5) * 0.9, 2.1, (Math.random() - 0.5) * 0.9),
+      bob: Math.random() * Math.PI * 2,
+    });
+  };
+
   // --- break debris ---------------------------------------------------------
   const debrisGeometry = new THREE.BoxGeometry(0.16, 0.16, 0.16);
   const debris: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; life: number }> = [];
@@ -234,6 +264,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     if (!isSolid(block[0], block[1], block[2])) return;
     solid.delete(key(block[0], block[1], block[2]));
     spawnDebris(new THREE.Vector3(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5));
+    spawnDrop(block);
     rebuild();
     crackMesh.visible = false;
     outline.visible = false;
@@ -245,6 +276,38 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     const hit = raycaster.intersectObject(mesh, false)[0];
     if (!hit || hit.instanceId === undefined) return null;
     return instanceBlocks[hit.instanceId] ?? null;
+  };
+
+  // Place a block against the face the ray hits (the empty cell in front of it).
+  const placeBlock = (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    reach: number,
+    playerPosition: THREE.Vector3,
+  ) => {
+    raycaster.set(origin, direction.clone().normalize());
+    raycaster.far = reach;
+    const hit = raycaster.intersectObject(mesh, false)[0];
+    if (!hit || hit.instanceId === undefined || !hit.face) return false;
+    const block = instanceBlocks[hit.instanceId];
+    if (!block) return false;
+    const normal = hit.face.normal;
+    const target: BlockCoord = [
+      block[0] + Math.round(normal.x),
+      block[1] + Math.round(normal.y),
+      block[2] + Math.round(normal.z),
+    ];
+    if (target[1] < 0 || isSolid(target[0], target[1], target[2])) return false;
+    // Never seal the player inside a block.
+    const px = Math.floor(playerPosition.x);
+    const pz = Math.floor(playerPosition.z);
+    const feet = Math.floor(playerPosition.y + 0.05);
+    if (target[0] === px && target[2] === pz && (target[1] === feet || target[1] === feet + 1)) {
+      return false;
+    }
+    solid.add(key(target[0], target[1], target[2]));
+    rebuild();
+    return true;
   };
 
   const highlightBlock = (block: BlockCoord | null) => {
@@ -275,7 +338,47 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     return true;
   };
 
-  const update = (delta: number) => {
+  const update = (
+    delta: number,
+    playerPosition?: THREE.Vector3,
+    onCollect?: (type: BlockType) => void,
+  ) => {
+    for (let index = drops.length - 1; index >= 0; index -= 1) {
+      const drop = drops[index]!;
+      const p = drop.mesh.position;
+      if (playerPosition) {
+        const dx = playerPosition.x - p.x;
+        const dy = playerPosition.y + 0.8 - p.y;
+        const dz = playerPosition.z - p.z;
+        const distance = Math.hypot(dx, dy, dz);
+        if (distance < 0.55) {
+          scene.remove(drop.mesh);
+          drops.splice(index, 1);
+          onCollect?.("grass");
+          continue;
+        }
+        if (distance < 1.9) {
+          // Vacuum the drop toward the player, Minecraft style.
+          p.x += (dx / distance) * delta * 6;
+          p.y += (dy / distance) * delta * 6;
+          p.z += (dz / distance) * delta * 6;
+          drop.mesh.rotation.y += delta * 3.5;
+          continue;
+        }
+      }
+      drop.bob += delta * 2.4;
+      drop.mesh.rotation.y += delta * 1.2;
+      drop.velocity.y -= 14 * delta;
+      p.addScaledVector(drop.velocity, delta);
+      drop.velocity.x *= Math.exp(-3 * delta);
+      drop.velocity.z *= Math.exp(-3 * delta);
+      const rest = groundHeight(p.x, p.z) + 0.17 + Math.sin(drop.bob) * 0.05;
+      if (p.y <= rest) {
+        p.y = rest;
+        drop.velocity.set(0, 0, 0);
+      }
+    }
+
     for (let index = debris.length - 1; index >= 0; index -= 1) {
       const piece = debris[index]!;
       piece.velocity.y -= 12 * delta;
@@ -293,6 +396,9 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const dispose = () => {
     for (const piece of debris) scene.remove(piece.mesh);
     debris.length = 0;
+    for (const drop of drops) scene.remove(drop.mesh);
+    drops.length = 0;
+    dropGeometry.dispose();
     scene.remove(mesh);
     scene.remove(crackMesh);
     scene.remove(outline);
@@ -325,6 +431,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     groundHeight,
     breakBlock,
     pickBlock,
+    placeBlock,
     removeBlock,
     showBreakProgress,
     highlightBlock,
