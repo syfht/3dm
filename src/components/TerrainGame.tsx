@@ -111,6 +111,12 @@ export default function TerrainGame() {
     let attackTime = 0;
     let attackMode: AttackMode | null = null;
     let pendingHits = 0;
+    // Progressive (Minecraft-style) block breaking.
+    let miningHeld = false;
+    let miningProgress = 0;
+    let miningBlock: [number, number, number] | null = null;
+    let attackBonus = 0;
+    const BREAK_TIME = 0.95;
 
     let windupPose: PoseMap | undefined;
     let strikePose: PoseMap | undefined;
@@ -339,6 +345,7 @@ export default function TerrainGame() {
       if (document.pointerLockElement !== renderer.domElement) {
         renderer.domElement.requestPointerLock();
       }
+      if (event.button === 0) miningHeld = true;
       if (attackTime > 0) return;
       if (event.button === 0) {
         attackMode = event.detail >= 2 ? "combo" : "punch";
@@ -361,14 +368,20 @@ export default function TerrainGame() {
 
     const onPointerMove = (event: MouseEvent) => {
       if (document.pointerLockElement !== renderer.domElement) return;
+      // Mouse right = look right, mouse left = look left (both views).
       cameraYaw -= event.movementX * 0.0023;
       const minPitch = firstPersonView ? -1.2 : -0.08;
       const maxPitch = firstPersonView ? 1.2 : 0.72;
-      cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.0018, minPitch, maxPitch);
+      // Vertical: same direction in both views (mouse up = look up).
+      cameraPitch = THREE.MathUtils.clamp(cameraPitch + event.movementY * 0.0018, minPitch, maxPitch);
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.button === 0) miningHeld = false;
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     document.addEventListener("mousemove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("contextmenu", onContextMenu);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
@@ -412,7 +425,8 @@ export default function TerrainGame() {
         worldVelocity.set(0, 0, 0);
         turnImpulse = THREE.MathUtils.lerp(turnImpulse, 0, Math.min(1, delta * 7));
       }
-      if (firstPersonView) character.rotation.y = cameraYaw;
+      // The model's forward axis is +Z, so it must face opposite the camera yaw.
+      if (firstPersonView) character.rotation.y = cameraYaw + Math.PI;
 
       verticalVelocity -= 12.5 * delta;
       character.position.y += verticalVelocity * delta;
@@ -481,15 +495,11 @@ export default function TerrainGame() {
           leanBack = (k <= 1 ? -0.12 * k : -0.12 - 0.16 * (k - 1)) * attackBlend;
           twist = -0.18 * (k <= 1 ? k : 2 - k) * attackBlend;
         }
-        // Landing frames break the block the character is facing.
+        // Landing frames chip away at the targeted block instead of breaking it.
         const hitPoint = attackMode === "combo" ? (pendingHits === 2 ? 0.3 : 0.74) : attackMode === "kick" ? 0.48 : 0.5;
         if (pendingHits > 0 && p >= hitPoint) {
           pendingHits -= 1;
-          const facing = new THREE.Vector3(Math.sin(character.rotation.y), 0, Math.cos(character.rotation.y));
-          const origin = character.position.clone().add(new THREE.Vector3(0, attackMode === "kick" ? 0.75 : 1.2, 0));
-          if (!world.breakBlock(origin, facing, 2.2)) {
-            world.breakBlock(origin, facing.clone().setY(-0.75).normalize(), 2.6);
-          }
+          attackBonus += 0.3;
         }
 
         if (attackTime === 0) {
@@ -604,6 +614,43 @@ export default function TerrainGame() {
         camera.position.lerp(desired, 1 - Math.exp(-7 * delta));
         camera.lookAt(target);
       }
+      // --- aiming + progressive block breaking -------------------------------
+      const aimOrigin = camera.position.clone();
+      const aimDirection = new THREE.Vector3();
+      if (firstPersonView) {
+        camera.getWorldDirection(aimDirection);
+      } else {
+        aimOrigin.copy(character.position).add(new THREE.Vector3(0, 1.2, 0));
+        aimDirection
+          .set(Math.sin(character.rotation.y), -0.3, Math.cos(character.rotation.y))
+          .normalize();
+      }
+      const aimed = world.pickBlock(aimOrigin, aimDirection, firstPersonView ? 5.5 : 3.2);
+      world.highlightBlock(firstPersonView ? aimed : null);
+      const sameBlock =
+        aimed && miningBlock
+          ? aimed[0] === miningBlock[0] && aimed[1] === miningBlock[1] && aimed[2] === miningBlock[2]
+          : false;
+      if (!sameBlock) {
+        miningBlock = aimed;
+        miningProgress = 0;
+      }
+      if (miningBlock && (miningHeld || attackBonus > 0)) {
+        if (miningHeld) miningProgress += delta / BREAK_TIME;
+        miningProgress += attackBonus;
+        attackBonus = 0;
+        if (miningProgress >= 1) {
+          world.removeBlock(miningBlock);
+          miningBlock = null;
+          miningProgress = 0;
+        }
+      } else if (!miningHeld) {
+        // Cracks heal back when the player stops mining.
+        miningProgress = Math.max(0, miningProgress - delta * 0.8);
+        attackBonus = 0;
+      }
+      world.showBreakProgress(miningBlock, miningProgress);
+
       sun.position.x = character.position.x - 18;
       sun.position.z = character.position.z + 12;
 
@@ -630,6 +677,7 @@ export default function TerrainGame() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       document.removeEventListener("mousemove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("contextmenu", onContextMenu);
       renderer.domElement.removeEventListener("wheel", onWheel);
@@ -643,6 +691,14 @@ export default function TerrainGame() {
   return (
     <main className="relative h-dvh w-full overflow-hidden bg-background text-foreground">
       <div ref={hostRef} className="absolute inset-0" aria-label="Open 3D terrain game" />
+
+      {firstPerson ? (
+        <div className="crosshair" aria-hidden="true">
+          <span />
+          <span />
+        </div>
+      ) : null}
+
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-5 sm:p-7">
         <div>
@@ -662,6 +718,7 @@ export default function TerrainGame() {
           <div><kbd>SPACE</kbd><span>Jump</span></div>
           <div><span className="mouse-icon" aria-hidden="true" /><span>Look / Scroll zoom</span></div>
           <div><kbd>L-CLICK</kbd><span>Punch</span></div>
+          <div><kbd>HOLD L</kbd><span>Mine block</span></div>
           <div><kbd>DBL-CLICK</kbd><span>Combo</span></div>
           <div><kbd>R-CLICK</kbd><span>Kick</span></div>
           <div><kbd>'</kbd><span>{firstPerson ? "Third person" : "First person"}</span></div>
