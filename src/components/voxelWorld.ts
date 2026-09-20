@@ -76,15 +76,53 @@ function grassTexture(kind: "top" | "side" | "dirt") {
   return texture;
 }
 
+export type BlockCoord = [number, number, number];
+
 export type VoxelWorld = {
   mesh: THREE.InstancedMesh;
   groundHeight: (x: number, z: number) => number;
   breakBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => boolean;
+  pickBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => BlockCoord | null;
+  removeBlock: (block: BlockCoord) => void;
+  showBreakProgress: (block: BlockCoord | null, progress: number) => void;
+  highlightBlock: (block: BlockCoord | null) => void;
   cameraClearance: (target: THREE.Vector3, toCamera: THREE.Vector3) => number;
 
   update: (delta: number) => void;
   dispose: () => void;
 };
+
+// Ten Minecraft-style crack stages drawn on transparent canvases.
+function crackTexture(stage: number) {
+  const size = 32;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return new THREE.Texture();
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = "rgba(0,0,0,0.85)";
+  const density = (stage + 1) / 10;
+  // Deterministic pseudo-cracks growing outward from the centre.
+  for (let branch = 0; branch < 6; branch += 1) {
+    const angle = (branch / 6) * Math.PI * 2 + hash2(branch, 1) * 0.9;
+    const length = (size * 0.48) * density * (0.5 + hash2(branch, 2) * 0.7);
+    let x = size / 2 + (hash2(branch, 3) - 0.5) * 4;
+    let y = size / 2 + (hash2(branch, 4) - 0.5) * 4;
+    const steps = Math.max(1, Math.floor(length));
+    for (let step = 0; step < steps; step += 1) {
+      x += Math.cos(angle) + (hash2(branch * 7 + step, 5) - 0.5) * 1.4;
+      y += Math.sin(angle) + (hash2(branch * 7 + step, 6) - 0.5) * 1.4;
+      if (x < 0 || y < 0 || x >= size || y >= size) break;
+      ctx.fillRect(Math.floor(x), Math.floor(y), 1, 1);
+      if (density > 0.55 && step % 2 === 0) ctx.fillRect(Math.floor(x) + 1, Math.floor(y), 1, 1);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  return texture;
+}
 
 export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const solid = new Set<string>();
@@ -169,16 +207,71 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
 
   const raycaster = new THREE.Raycaster();
 
-  const breakBlock = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => {
-    raycaster.set(origin, direction.clone().normalize());
-    raycaster.far = reach;
-    const hit = raycaster.intersectObject(mesh, false)[0];
-    if (!hit || hit.instanceId === undefined) return false;
-    const block = instanceBlocks[hit.instanceId];
-    if (!block) return false;
+  // --- targeting + progressive breaking -------------------------------------
+  const crackTextures = Array.from({ length: 10 }, (_, stage) => crackTexture(stage));
+  const crackMaterial = new THREE.MeshBasicMaterial({
+    map: crackTextures[0] ?? null,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  });
+  const crackMesh = new THREE.Mesh(new THREE.BoxGeometry(1.004, 1.004, 1.004), crackMaterial);
+  crackMesh.visible = false;
+  crackMesh.renderOrder = 2;
+  scene.add(crackMesh);
+
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1.008, 1.008, 1.008)),
+    new THREE.LineBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.55 }),
+  );
+  outline.visible = false;
+  outline.renderOrder = 3;
+  scene.add(outline);
+
+  const removeBlock = (block: BlockCoord) => {
+    if (!isSolid(block[0], block[1], block[2])) return;
     solid.delete(key(block[0], block[1], block[2]));
     spawnDebris(new THREE.Vector3(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5));
     rebuild();
+    crackMesh.visible = false;
+    outline.visible = false;
+  };
+
+  const pickBlock = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number): BlockCoord | null => {
+    raycaster.set(origin, direction.clone().normalize());
+    raycaster.far = reach;
+    const hit = raycaster.intersectObject(mesh, false)[0];
+    if (!hit || hit.instanceId === undefined) return null;
+    return instanceBlocks[hit.instanceId] ?? null;
+  };
+
+  const highlightBlock = (block: BlockCoord | null) => {
+    if (!block) {
+      outline.visible = false;
+      return;
+    }
+    outline.position.set(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5);
+    outline.visible = true;
+  };
+
+  const showBreakProgress = (block: BlockCoord | null, progress: number) => {
+    if (!block || progress <= 0) {
+      crackMesh.visible = false;
+      return;
+    }
+    const stage = THREE.MathUtils.clamp(Math.floor(progress * 10), 0, 9);
+    crackMaterial.map = crackTextures[stage]!;
+    crackMaterial.needsUpdate = true;
+    crackMesh.position.set(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5);
+    crackMesh.visible = true;
+  };
+
+  const breakBlock = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => {
+    const block = pickBlock(origin, direction, reach);
+    if (!block) return false;
+    removeBlock(block);
     return true;
   };
 
@@ -201,6 +294,13 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     for (const piece of debris) scene.remove(piece.mesh);
     debris.length = 0;
     scene.remove(mesh);
+    scene.remove(crackMesh);
+    scene.remove(outline);
+    crackMesh.geometry.dispose();
+    crackMaterial.dispose();
+    crackTextures.forEach((texture) => texture.dispose());
+    outline.geometry.dispose();
+    (outline.material as THREE.Material).dispose();
     geometry.dispose();
     debrisGeometry.dispose();
     for (const material of [top, side, dirt]) {
@@ -220,6 +320,17 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     return Math.max(0, (hit.distance - 0.25) / length);
   };
 
-  return { mesh, groundHeight, breakBlock, cameraClearance, update, dispose };
+  return {
+    mesh,
+    groundHeight,
+    breakBlock,
+    pickBlock,
+    removeBlock,
+    showBreakProgress,
+    highlightBlock,
+    cameraClearance,
+    update,
+    dispose,
+  };
 
 }
