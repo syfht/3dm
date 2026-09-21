@@ -406,6 +406,91 @@
       inset 0 0 0 4px color-mix(in oklab, oklch(0.4 0.04 58) 55%, transparent);
   }
 
+  /* --- pixel-art item sprites (sticks, tools, chest, furnace, stone) ------- */
+
+  .block-icon.is-stone,
+  .block-icon.is-chest,
+  .block-icon.is-furnace,
+  .block-icon.is-stick,
+  .block-icon.is-wooden_sword,
+  .block-icon.is-stone_sword,
+  .block-icon.is-wooden_pickaxe,
+  .block-icon.is-stone_pickaxe,
+  .block-icon.is-wooden_axe,
+  .block-icon.is-stone_axe,
+  .block-icon.is-wooden_shovel,
+  .block-icon.is-stone_shovel,
+  .block-icon.is-wooden_hoe,
+  .block-icon.is-stone_hoe {
+    background-image: url("/__l5e/assets-v1/af9a0411-a1e2-47a8-8d7b-3a576e573ea3/items.png");
+    background-repeat: no-repeat;
+    background-size: 1400% 100%;
+    background-color: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    image-rendering: pixelated;
+    filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.45));
+  }
+
+  .block-icon.is-stick {
+    background-position: 0% 50%;
+  }
+  .block-icon.is-wooden_sword {
+    background-position: 7.6923% 50%;
+  }
+  .block-icon.is-wooden_pickaxe {
+    background-position: 15.3846% 50%;
+  }
+  .block-icon.is-wooden_axe {
+    background-position: 23.0769% 50%;
+  }
+  .block-icon.is-wooden_shovel {
+    background-position: 30.7692% 50%;
+  }
+  .block-icon.is-wooden_hoe {
+    background-position: 38.4615% 50%;
+  }
+  .block-icon.is-stone_sword {
+    background-position: 46.1538% 50%;
+  }
+  .block-icon.is-stone_pickaxe {
+    background-position: 53.8462% 50%;
+  }
+  .block-icon.is-stone_axe {
+    background-position: 61.5385% 50%;
+  }
+  .block-icon.is-stone_shovel {
+    background-position: 69.2308% 50%;
+  }
+  .block-icon.is-stone_hoe {
+    background-position: 76.9231% 50%;
+  }
+  .block-icon.is-chest {
+    background-position: 84.6154% 50%;
+  }
+  .block-icon.is-furnace {
+    background-position: 92.3077% 50%;
+  }
+  .block-icon.is-stone {
+    background-position: 100% 50%;
+  }
+
+  /* Ladder: two wooden rails with rungs between them. */
+  .block-icon.is-ladder {
+    background-color: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    background-image:
+      linear-gradient(to right, transparent 16%, rgb(150 112 64) 16% 28%, transparent 28% 72%, rgb(150 112 64) 72% 84%, transparent 84%),
+      repeating-linear-gradient(to bottom, rgb(122 88 48) 0 16%, transparent 16% 33%);
+    background-size: 100% 100%, 68% 100%;
+    background-position: 0 0, 50% 8%;
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.45));
+  }
+
+
+
   .slot-count {
     position: absolute;
     right: 0.18rem;
