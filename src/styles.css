@@ -955,3 +955,20 @@
   color: #fff;
   font-weight: 700;
 }
+
+@layer components {
+  /* Minecraft-style damage tint over the whole view. */
+  .hurt-flash {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    pointer-events: none;
+    background: radial-gradient(circle at 50% 50%, rgb(255 40 40 / 0.18), rgb(180 0 0 / 0.42));
+    animation: hurt-fade 400ms ease-out forwards;
+  }
+
+  @keyframes hurt-fade {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+}
