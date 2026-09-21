@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { Eye, PersonStanding } from "lucide-react";
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import modelAsset from "@/assets/mai_shiranui_kof_xv.glb.asset.json";
+import { MODEL_URL, createModelLoader } from "@/assets/model";
 import { createVoxelWorld, type BlockType } from "./voxelWorld";
 import InventoryPanel from "./InventoryPanel";
 import MobileControls from "./MobileControls";
 import { makeHandItem } from "./handItems";
 import { createRemotePlayers } from "./remotePlayers";
 import { startBackgroundTicker } from "@/lib/backgroundTicker";
-import { connectWorld, touchWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
+import { connectWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
+import { HIT_RANGE, HURT_FLASH_MS } from "@/lib/protocol";
 import {
   BLOCK_LABEL,
   BREAK_TIMES,
@@ -25,7 +25,6 @@ import {
 
 const MAX_HEALTH = 20; // 10 hearts
 
-const MODEL_URL = modelAsset.url;
 
 type KeyState = Record<string, boolean>;
 
@@ -103,8 +102,27 @@ export default function TerrainGame({
     healthRef.current = next;
     setHealth(next);
   };
+  // Taking damage flashes the screen red, the way Minecraft tints a hit player.
+  const [hurt, setHurt] = useState(false);
+  const hurtTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashHurt = () => {
+    setHurt(true);
+    if (hurtTimer.current) clearTimeout(hurtTimer.current);
+    hurtTimer.current = setTimeout(() => setHurt(false), HURT_FLASH_MS);
+  };
+  useEffect(() => () => {
+    if (hurtTimer.current) clearTimeout(hurtTimer.current);
+  }, []);
+  // Online, the server owns health: local damage (falls) is reported to it and
+  // the new value comes back in the next snapshot. Offline it applies directly.
+  const linkRef = useRef<ReturnType<typeof connectWorld> | null>(null);
   const damagePlayer = (amount: number) => {
     if (amount <= 0) return;
+    flashHurt();
+    if (linkRef.current) {
+      linkRef.current.sendDamage(amount);
+      return;
+    }
     setHealthValue(healthRef.current - amount);
   };
   const [, setAttackLabel] = useState<string | null>(null);
@@ -357,6 +375,7 @@ export default function TerrainGame({
   useEffect(() => {
     usernameRef.current = (username || "Player").trim() || "Player";
     setNameTagRef.current(usernameRef.current);
+    linkRef.current?.setName(usernameRef.current);
   }, [username]);
 
   useEffect(() => {
@@ -458,21 +477,25 @@ export default function TerrainGame({
       makeItem: (type) =>
         isPlaceable(type) ? world.makeBlockMesh(0.19, type) : makeHandItem(type),
     });
-    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    // Filled in once the character exists (below); the server may move us.
+    let teleportTo: ((x: number, y: number, z: number) => void) | null = null;
     if (online?.online && online.worldId) {
-      const worldId = online.worldId;
-      link = connectWorld(worldId, {
-        onEdit: (edit) => world.applyRemoteEdit(edit),
-        onPlayers: (players: RemotePose[]) => {
-          remotePlayers.setPlayers(players);
-          setPlayerCount(players.length + 1);
+      link = connectWorld(
+        online.worldId,
+        {
+          onEdit: (edit) => world.applyRemoteEdit(edit),
+          onPlayers: (players: RemotePose[]) => {
+            remotePlayers.setPlayers(players);
+            setPlayerCount(players.length + 1);
+          },
+          onHealth: (hp) => setHealthValue(hp),
+          onHit: () => flashHurt(),
+          onHurt: (id) => remotePlayers.flash(id),
+          onTeleport: (position) => teleportTo?.(position.x, position.y, position.z),
         },
-        onHit: (amount) => damagePlayer(amount),
-      });
-      // Keeps the world alive while anyone is playing; after 30 idle minutes
-      // the next player to join gets a brand new terrain.
-      heartbeat = setInterval(() => void touchWorld(worldId), 60000);
-      void touchWorld(worldId);
+        { name: usernameRef.current?.trim() || "Player", editsUpTo: online.editsUpTo },
+      );
+      linkRef.current = link;
     }
     let poseTimer = 0;
 
@@ -542,6 +565,10 @@ export default function TerrainGame({
     let visualStepOffset = 0;
     let landingImpact = 0;
     let regenTimer = 0;
+    teleportTo = (x, y, z) => {
+      character.position.set(x, y, z);
+      verticalVelocity = 0;
+    };
     let airborneBlend = 0;
     let cameraYaw = 0;
     let cameraPitch = 0.12;
@@ -608,7 +635,7 @@ export default function TerrainGame({
     const springBones: SpringBone[] = [];
     const clock = new THREE.Clock();
 
-    const loader = new GLTFLoader();
+    const loader = createModelLoader();
     loader.load(MODEL_URL, (gltf) => {
       const loadedModel = gltf.scene;
       model = loadedModel;
@@ -1073,8 +1100,11 @@ export default function TerrainGame({
       }
       world.update(delta, character.position, addToInventory);
 
-      // Health: slow regeneration, and a respawn when it runs out.
-      if (healthRef.current <= 0) {
+      // Health: slow regeneration, and a respawn when it runs out. Online the
+      // server handles both (so it also works while this tab is asleep).
+      if (link) {
+        /* server-authoritative */
+      } else if (healthRef.current <= 0) {
         character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
         verticalVelocity = 0;
         setHealthValue(MAX_HEALTH);
@@ -1163,7 +1193,7 @@ export default function TerrainGame({
           // PvP: whoever the crosshair is on takes the hit.
           if (link) {
             camera.getWorldDirection(pvpAim);
-            const targetId = remotePlayers.hitTest(camera.position, pvpAim, 4.2);
+            const targetId = remotePlayers.hitTest(camera.position, pvpAim, HIT_RANGE);
             if (targetId) {
               hitPlayer = true;
               link.sendHit(targetId, meleeDamage(attackMode));
@@ -1467,10 +1497,9 @@ export default function TerrainGame({
       remotePlayers.update(delta, (x, z, y) => world.groundHeight(x, z, y));
       poseTimer -= delta;
       if (link && poseTimer <= 0) {
-        // Stay under the realtime 10 messages/second budget.
-        poseTimer = attackMode ? 0.11 : 0.15;
+        // ~15 updates a second; the server rebroadcasts at the same rate.
+        poseTimer = attackMode ? 0.05 : 0.066;
         link.sendPose({
-          name: usernameRef.current?.trim() || "Player",
           x: character.position.x,
           y: character.position.y,
           z: character.position.z,
@@ -1519,8 +1548,8 @@ export default function TerrainGame({
       renderer.domElement.removeEventListener("pointermove", onTouchMove);
       renderer.domElement.removeEventListener("contextmenu", onContextMenu);
       renderer.domElement.removeEventListener("wheel", onWheel);
-      if (heartbeat) clearInterval(heartbeat);
       link?.dispose();
+      linkRef.current = null;
       remotePlayers.dispose();
       world.dispose();
       renderer.dispose();
@@ -1537,6 +1566,8 @@ export default function TerrainGame({
         <span />
         <span />
       </div>
+
+      {hurt ? <div className="hurt-flash" aria-hidden="true" /> : null}
 
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-end gap-2 p-5 sm:p-7">
