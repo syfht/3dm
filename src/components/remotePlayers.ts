@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { RemotePose } from "@/lib/multiplayer";
+import { HURT_FLASH_MS } from "@/lib/protocol";
 import type { ItemType } from "./inventory";
 
 // Other players in the world. They use the same character model as the local
@@ -156,7 +157,14 @@ type Avatar = {
   item: ItemType | null;
   itemMesh: THREE.Object3D | null;
   verticalVelocity: number;
+  /** Minecraft-style damage tint: materials owned by this avatar + timer. */
+  tint: { material: THREE.MeshStandardMaterial; color: THREE.Color; emissive: THREE.Color }[];
+  hurtUntil: number;
+  tinted: boolean;
 };
+
+const HURT_COLOR = new THREE.Color(0xff2a2a);
+const HURT_EMISSIVE = new THREE.Color(0x550000);
 
 export function createRemotePlayers(
   scene: THREE.Scene,
@@ -169,11 +177,27 @@ export function createRemotePlayers(
     if (!template) return;
     if (avatar.body) avatar.group.remove(avatar.body);
     const body = cloneSkinned(template);
+    // Clone the materials so this avatar can flash red on its own.
+    avatar.tint = [];
+    avatar.tinted = false;
     body.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.isMesh) {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        const cloned = materials.map((material) => {
+          const copy = (material as THREE.MeshStandardMaterial).clone();
+          if (copy.color) {
+            avatar.tint.push({
+              material: copy,
+              color: copy.color.clone(),
+              emissive: copy.emissive ? copy.emissive.clone() : new THREE.Color(0x000000),
+            });
+          }
+          return copy;
+        });
+        mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0]!;
       }
     });
     avatar.group.add(body);
@@ -245,6 +269,9 @@ export function createRemotePlayers(
       item: null,
       itemMesh: null,
       verticalVelocity: 0,
+      tint: [],
+      hurtUntil: 0,
+      tinted: false,
     };
     attachBody(avatar);
     avatars.set(id, avatar);
@@ -263,6 +290,7 @@ export function createRemotePlayers(
     scene.remove(avatar.group);
     avatar.sprite.material.map?.dispose();
     avatar.sprite.material.dispose();
+    for (const entry of avatar.tint) entry.material.dispose();
     avatars.delete(id);
   };
 
@@ -320,8 +348,28 @@ export function createRemotePlayers(
   const swingQuaternion = new THREE.Quaternion();
   const targetQuaternion = new THREE.Quaternion();
 
+  // Flash a player red (Minecraft-style hurt tint).
+  const flash = (id: string) => {
+    const avatar = avatars.get(id);
+    if (avatar) avatar.hurtUntil = performance.now() + HURT_FLASH_MS;
+  };
+
   const update = (delta: number, groundHeight?: (x: number, z: number, y: number) => number) => {
+    const now = performance.now();
     for (const avatar of avatars.values()) {
+      const hurt = avatar.hurtUntil > now;
+      if (hurt !== avatar.tinted) {
+        avatar.tinted = hurt;
+        for (const entry of avatar.tint) {
+          if (hurt) {
+            entry.material.color.copy(HURT_COLOR);
+            if (entry.material.emissive) entry.material.emissive.copy(HURT_EMISSIVE);
+          } else {
+            entry.material.color.copy(entry.color);
+            if (entry.material.emissive) entry.material.emissive.copy(entry.emissive);
+          }
+        }
+      }
       if (groundHeight) {
         const groundY = groundHeight(avatar.target.x, avatar.target.z, avatar.target.y + 0.5);
         if (avatar.target.y > groundY + 0.001) {
@@ -408,5 +456,5 @@ export function createRemotePlayers(
     for (const id of [...avatars.keys()]) remove(id);
   };
 
-  return { setPlayers, setTemplate, update, hitTest, dispose, count: () => avatars.size };
+  return { setPlayers, setTemplate, update, hitTest, flash, dispose, count: () => avatars.size };
 }
