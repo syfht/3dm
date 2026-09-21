@@ -46,7 +46,7 @@ export default function LoadingScreen({ percent, onFull }: { percent: number; on
     return () => clearInterval(id);
   }, [target]);
 
-  const value = Math.round(displayed);
+  const value = Math.max(0, Math.min(100, Math.round(displayed)));
   const finding = target === 0;
   return (
     <div className="loading-screen">
