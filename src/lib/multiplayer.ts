@@ -1,21 +1,19 @@
-// Browser side of the multiplayer link. Talks to the game server in /server
-// over one WebSocket: the server owns the player roster, everyone's latest
-// pose, health, and block edits, and streams snapshots back at a fixed rate.
+// Browser side of the multiplayer link, running on Lovable Cloud.
 //
-// Background tabs are handled explicitly: pings, reconnects and a "hidden"
-// flag run off a worker ticker (which browsers do not throttle), and when a
-// tab wakes up it re-syncs edits and accepts any position the server moved it
-// to while it slept.
+// The shared world (its seed and every block change) lives in the database,
+// and everyone in the same world joins one realtime channel: poses, hits and
+// block changes are broadcast between players, presence tells us who left.
+// This needs no separate game server, so multiplayer works on the public
+// published link.
+//
+// Each browser owns its own health: it applies damage it receives, regenerates,
+// and respawns itself, then tells everyone else so they see the red flash.
 
-import type { WorldEdit } from "@/components/voxelWorld";
+import { supabase } from "@/integrations/supabase/client";
+import type { WorldEdit, BlockType } from "@/components/voxelWorld";
+import { columnHeight } from "./terrain";
 import { startBackgroundTicker } from "./backgroundTicker";
-import type {
-  ClientMessage,
-  PlayerState,
-  Pose,
-  ServerMessage,
-  WorldInfo,
-} from "./protocol";
+import { MAX_HEALTH, SNAPSHOT_HZ, WORLD_IDLE_MS, type PlayerState, type Pose } from "./protocol";
 
 export type { Pose };
 export type RemotePose = PlayerState;
@@ -32,49 +30,100 @@ export type WorldSession = {
   edits: WorldEdit[];
   editsUpTo: number;
   online: boolean;
+  /** When this world was created (ms). Everyone shares one day/night clock. */
+  startedAt: number;
 };
 
-const OFFLINE: WorldSession = { worldId: null, seed: 0, edits: [], editsUpTo: 0, online: false };
+const OFFLINE: WorldSession = {
+  worldId: null,
+  seed: 0,
+  edits: [],
+  editsUpTo: 0,
+  online: false,
+  startedAt: Date.now(),
+};
 
-const PING_MS = 5000;
+/** Drop a player we have not heard from for this long. */
+const PLAYER_TIMEOUT_MS = 6000;
+/** Cap on how often we put our own pose on the wire. */
+const POSE_MIN_INTERVAL_MS = 80;
+/** How often we mark the world as still being played. */
+const TOUCH_MS = 60_000;
+/** Seconds between health regeneration steps. */
+const REGEN_SECONDS = 4;
 
-/** Base URL of the game server; same origin unless VITE_GAME_SERVER_URL is set. */
-function serverBase() {
-  const configured = (import.meta.env["VITE_GAME_SERVER_URL"] as string | undefined)?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  return typeof window === "undefined" ? "" : window.location.origin;
-}
+type EditRow = { id: number; x: number; y: number; z: number; block: string | null };
 
-function wsUrl(worldId: string, name: string) {
-  const base = serverBase().replace(/^http/, "ws");
-  const params = new URLSearchParams({ world: worldId, id: CLIENT_ID, name });
-  return `${base}/ws?${params.toString()}`;
-}
-
-// Joins the shared world (the server hands out a fresh one when the last one
-// has been empty for a while) and loads every block change made so far.
+/**
+ * Joins the shared world (a fresh one is started when the last one has been
+ * empty for a while) and loads every block change made in it so far.
+ */
 export async function joinWorld(): Promise<WorldSession> {
   try {
-    const response = await fetch(`${serverBase()}/api/game/world`, { cache: "no-store" });
-    if (!response.ok) return OFFLINE;
-    const world = (await response.json()) as WorldInfo;
+    const activeSince = new Date(Date.now() - WORLD_IDLE_MS).toISOString();
+    const existing = await supabase
+      .from("worlds")
+      .select("id, seed, created_at")
+      .gte("last_active_at", activeSince)
+      .order("last_active_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let worldId = existing.data?.id ?? null;
+    let seed = existing.data ? Number(existing.data.seed) : 0;
+    let startedAt = existing.data ? Date.parse(existing.data.created_at) : Date.now();
+
+    if (!worldId) {
+      const created = await supabase
+        .from("worlds")
+        .insert({ seed: Math.floor(Math.random() * 2_000_000_000) })
+        .select("id, seed, created_at")
+        .single();
+      if (created.error || !created.data) return OFFLINE;
+      worldId = created.data.id;
+      seed = Number(created.data.seed);
+      startedAt = Date.parse(created.data.created_at);
+    } else {
+      void supabase.from("worlds").update({ last_active_at: new Date().toISOString() }).eq("id", worldId);
+    }
+
+    const editRows = await supabase
+      .from("world_edits")
+      .select("id, x, y, z, block")
+      .eq("world_id", worldId)
+      .order("id", { ascending: true });
+
+    const rows = (editRows.data ?? []) as EditRow[];
     return {
-      worldId: world.worldId,
-      seed: Number(world.seed),
-      edits: world.edits,
-      editsUpTo: world.editsUpTo,
+      worldId,
+      seed,
+      edits: rows.map(toEdit),
+      editsUpTo: rows.length ? Number(rows[rows.length - 1]!.id) : 0,
       online: true,
+      startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
     };
-  } catch {
+  } catch (error) {
+    console.warn("[multiplayer] could not join the shared world", error);
     return OFFLINE;
   }
+}
+
+function toEdit(row: EditRow): WorldEdit {
+  return { x: row.x, y: row.y, z: row.z, block: (row.block as BlockType | null) ?? null };
 }
 
 export type WorldChannel = {
   sendPose: (pose: Pose) => void;
   sendEdit: (edit: WorldEdit) => void;
   sendHit: (targetId: string, amount: number) => void;
-  /** Report self-inflicted damage (falls) so the server keeps health authoritative. */
+  /** Items spilled into the world (death drops): everyone should see them. */
+  sendDrops: (
+    position: { x: number; y: number; z: number },
+    items: Array<{ id: string; type: string; count: number }>,
+  ) => void;
+  /** We collected a dropped item, so it is gone for everyone. */
+  sendPickup: (id: string) => void;
+  /** Report self-inflicted damage (falls). */
   sendDamage: (amount: number) => void;
   setName: (name: string) => void;
   dispose: () => void;
@@ -83,177 +132,228 @@ export type WorldChannel = {
 export type WorldHandlers = {
   onEdit: (edit: WorldEdit) => void;
   onPlayers: (players: RemotePose[]) => void;
-  /** Authoritative health from the server. */
+  /** Our current health. */
   onHealth?: (hp: number) => void;
   /** Someone landed a hit on us (for effects; health arrives via onHealth). */
   onHit?: (amount: number, from: string) => void;
   /** A player (possibly us) took damage: flash them red. */
   onHurt?: (id: string) => void;
-  /** The server moved us: we died, or it simulated our fall while the tab slept. */
+  /** We respawned after running out of health. */
   onTeleport?: (position: { x: number; y: number; z: number }, reason: "respawn" | "correct") => void;
+  /** Another player spilled items into the world. */
+  onDrops?: (
+    position: { x: number; y: number; z: number },
+    items: Array<{ id: string; type: string; count: number }>,
+  ) => void;
+  /** Someone else picked up a dropped item. */
+  onPickup?: (id: string) => void;
   onStatus?: (connected: boolean) => void;
 };
+
+type PoseBroadcast = PlayerState;
+type HitBroadcast = { target: string; amount: number; from: string };
+type HurtBroadcast = { id: string };
+type DropsBroadcast = {
+  x: number;
+  y: number;
+  z: number;
+  items: Array<{ id: string; type: string; count: number }>;
+};
+type PickupBroadcast = { id: string };
 
 // Live link for one world: block changes plus everyone's position.
 export function connectWorld(
   worldId: string,
   handlers: WorldHandlers,
-  options: { name?: string; editsUpTo?: number } = {},
+  options: { name?: string; editsUpTo?: number; seed?: number } = {},
 ): WorldChannel {
   let name = options.name ?? "Player";
   let editsUpTo = options.editsUpTo ?? 0;
-  let socket: WebSocket | null = null;
-  let open = false;
+  const seed = options.seed ?? 0;
+
   let disposed = false;
-  let attempts = 0;
-  let reconnectAt = 0;
-  let lastPingAt = 0;
+  let connected = false;
+  let hp = MAX_HEALTH;
+  let regenCarry = 0;
+  let lastPoseSentAt = 0;
   let lastPose: Pose | null = null;
-  let everConnected = false;
+  let lastTouchAt = Date.now();
+  let lastTickAt = Date.now();
 
-  const send = (message: ClientMessage) => {
-    if (!open || !socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify(message));
+  const others = new Map<string, { state: PlayerState; seenAt: number }>();
+
+  const spawnPoint = () => ({ x: 0.5, y: columnHeight(0, 0, seed) + 1.05, z: 0.5 });
+
+  const channel = supabase.channel(`world:${worldId}`, {
+    config: { broadcast: { self: false }, presence: { key: CLIENT_ID } },
+  });
+
+  const push = (event: string, payload: unknown) => {
+    if (!connected) return;
+    void channel.send({ type: "broadcast", event, payload });
   };
 
-  const handle = (message: ServerMessage) => {
-    switch (message.t) {
-      case "welcome":
-        handlers.onPlayers(message.players);
-        handlers.onHealth?.(message.hp);
-        return;
-      case "state":
-        handlers.onPlayers(message.players);
-        handlers.onHealth?.(message.hp);
-        return;
-      case "edit":
-        editsUpTo = Math.max(editsUpTo, message.at);
-        handlers.onEdit({ x: message.x, y: message.y, z: message.z, block: message.block });
-        return;
-      case "edits":
-        editsUpTo = Math.max(editsUpTo, message.upTo);
-        for (const edit of message.edits) handlers.onEdit(edit);
-        return;
-      case "hit":
-        handlers.onHit?.(message.amount, message.from);
-        return;
-      case "hurt":
-        handlers.onHurt?.(message.id);
-        return;
-      case "respawn":
-        handlers.onTeleport?.({ x: message.x, y: message.y, z: message.z }, "respawn");
-        return;
-      case "correct":
-        handlers.onTeleport?.({ x: message.x, y: message.y, z: message.z }, "correct");
-        return;
-      case "error":
-        console.warn("[multiplayer]", message.message);
-        return;
-      default:
-        return;
-    }
+  const setHealth = (next: number) => {
+    const clamped = Math.max(0, Math.min(MAX_HEALTH, next));
+    if (clamped === hp) return;
+    hp = clamped;
+    handlers.onHealth?.(hp);
   };
 
-  const connect = () => {
-    if (disposed) return;
-    try {
-      socket = new WebSocket(wsUrl(worldId, name));
-    } catch (error) {
-      console.warn("[multiplayer] cannot open link", error);
-      scheduleReconnect();
-      return;
-    }
-    const current = socket;
-    current.onopen = () => {
-      if (current !== socket) return;
-      open = true;
-      attempts = 0;
-      lastPingAt = Date.now();
-      handlers.onStatus?.(true);
-      if (typeof document !== "undefined" && document.hidden) send({ t: "hidden", hidden: true });
-      // Anything that happened while we were away.
-      if (everConnected) send({ t: "sync", since: editsUpTo });
-      everConnected = true;
-      if (lastPose) send({ t: "pose", ...lastPose });
-    };
-    current.onmessage = (event) => {
-      if (current !== socket) return;
-      try {
-        handle(JSON.parse(String(event.data)) as ServerMessage);
-      } catch {
-        /* ignore malformed frames */
+  const takeDamage = (amount: number, from: string | null) => {
+    if (amount <= 0) return;
+    setHealth(hp - amount);
+    regenCarry = 0;
+    if (from) handlers.onHit?.(amount, from);
+    handlers.onHurt?.(CLIENT_ID);
+    push("hurt", { id: CLIENT_ID } satisfies HurtBroadcast);
+    if (hp <= 0) respawn();
+  };
+
+  const respawn = () => {
+    const point = spawnPoint();
+    handlers.onTeleport?.(point, "respawn");
+    hp = MAX_HEALTH;
+    handlers.onHealth?.(hp);
+  };
+
+  channel
+    .on("broadcast", { event: "pose" }, ({ payload }) => {
+      const state = payload as PoseBroadcast;
+      if (!state?.id || state.id === CLIENT_ID) return;
+      others.set(state.id, { state, seenAt: Date.now() });
+    })
+    .on("broadcast", { event: "edit" }, ({ payload }) => {
+      const edit = payload as WorldEdit & { at?: number };
+      if (typeof edit?.x !== "number") return;
+      if (edit.at) editsUpTo = Math.max(editsUpTo, edit.at);
+      handlers.onEdit({ x: edit.x, y: edit.y, z: edit.z, block: edit.block ?? null });
+    })
+    .on("broadcast", { event: "hit" }, ({ payload }) => {
+      const hit = payload as HitBroadcast;
+      if (hit?.target !== CLIENT_ID) return;
+      takeDamage(hit.amount, hit.from);
+    })
+    .on("broadcast", { event: "hurt" }, ({ payload }) => {
+      const hurt = payload as HurtBroadcast;
+      if (hurt?.id && hurt.id !== CLIENT_ID) handlers.onHurt?.(hurt.id);
+    })
+    .on("broadcast", { event: "drops" }, ({ payload }) => {
+      const drop = payload as DropsBroadcast;
+      if (!drop?.items?.length) return;
+      handlers.onDrops?.({ x: drop.x, y: drop.y, z: drop.z }, drop.items);
+    })
+    .on("broadcast", { event: "pickup" }, ({ payload }) => {
+      const pickup = payload as PickupBroadcast;
+      if (pickup?.id) handlers.onPickup?.(pickup.id);
+    })
+    .on("presence", { event: "leave" }, ({ leftPresences }) => {
+      for (const presence of leftPresences as Array<{ id?: string }>) {
+        if (presence?.id) others.delete(presence.id);
       }
-    };
-    current.onclose = () => {
-      if (current !== socket) return;
-      open = false;
-      handlers.onStatus?.(false);
-      scheduleReconnect();
-    };
-    current.onerror = () => {
-      /* onclose follows */
-    };
+    })
+    .subscribe((status) => {
+      if (disposed) return;
+      const isOpen = status === "SUBSCRIBED";
+      if (isOpen === connected) return;
+      connected = isOpen;
+      handlers.onStatus?.(connected);
+      if (!connected) return;
+      void channel.track({ id: CLIENT_ID, name });
+      void syncEdits();
+      if (lastPose) sendPose(lastPose, true);
+    });
+
+  // Pull in block changes made while we were away or disconnected.
+  const syncEdits = async () => {
+    const { data } = await supabase
+      .from("world_edits")
+      .select("id, x, y, z, block")
+      .eq("world_id", worldId)
+      .gt("id", editsUpTo)
+      .order("id", { ascending: true });
+    for (const row of (data ?? []) as EditRow[]) {
+      editsUpTo = Math.max(editsUpTo, Number(row.id));
+      handlers.onEdit(toEdit(row));
+    }
   };
 
-  const scheduleReconnect = () => {
-    if (disposed) return;
-    attempts += 1;
-    const delay = Math.min(15_000, 500 * 2 ** Math.min(attempts, 5));
-    reconnectAt = Date.now() + delay;
+  const sendPose = (pose: Pose, force = false) => {
+    lastPose = pose;
+    const now = Date.now();
+    if (!force && now - lastPoseSentAt < POSE_MIN_INTERVAL_MS) return;
+    lastPoseSentAt = now;
+    push("pose", { ...pose, id: CLIENT_ID, name, hp } satisfies PoseBroadcast);
   };
 
-  // Keep-alive and reconnect run from a worker so they keep working while
-  // the tab is in the background (plain timers get throttled to once a
-  // minute there, which used to silently drop the link).
+  // Roster, health regeneration and keep-alive run off a worker ticker so they
+  // keep working while the tab sits in the background.
   const stopTicker = startBackgroundTicker(() => {
     if (disposed) return;
     const now = Date.now();
-    if (!open) {
-      if (reconnectAt && now >= reconnectAt && (!socket || socket.readyState === WebSocket.CLOSED)) {
-        reconnectAt = 0;
-        connect();
+    const delta = Math.min(2, (now - lastTickAt) / 1000);
+    lastTickAt = now;
+
+    for (const [id, entry] of others) {
+      if (now - entry.seenAt > PLAYER_TIMEOUT_MS) others.delete(id);
+    }
+    handlers.onPlayers([...others.values()].map((entry) => entry.state));
+
+    if (hp > 0 && hp < MAX_HEALTH) {
+      regenCarry += delta;
+      if (regenCarry >= REGEN_SECONDS) {
+        regenCarry = 0;
+        setHealth(hp + 1);
       }
-      return;
     }
-    if (now - lastPingAt >= PING_MS) {
-      lastPingAt = now;
-      send({ t: "ping" });
+
+    if (now - lastTouchAt >= TOUCH_MS) {
+      lastTouchAt = now;
+      void supabase.from("worlds").update({ last_active_at: new Date(now).toISOString() }).eq("id", worldId);
     }
-  }, 1000);
+  }, Math.round(1000 / SNAPSHOT_HZ));
 
   const onVisibility = () => {
-    const hidden = document.hidden;
-    send({ t: "hidden", hidden });
-    if (!hidden) {
-      // Coming back: pull any edits we missed and refresh our pose promptly.
-      send({ t: "sync", since: editsUpTo });
-      if (lastPose) send({ t: "pose", ...lastPose });
-    }
+    if (document.hidden) return;
+    void syncEdits();
+    if (lastPose) sendPose(lastPose, true);
   };
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
 
-  connect();
-
   return {
-    sendPose: (pose) => {
-      lastPose = pose;
-      send({ t: "pose", ...pose });
+    sendPose: (pose) => sendPose(pose),
+    sendEdit: (edit) => {
+      push("edit", edit);
+      void supabase
+        .from("world_edits")
+        .insert({ world_id: worldId, x: edit.x, y: edit.y, z: edit.z, block: edit.block })
+        .select("id")
+        .single()
+        .then(({ data }) => {
+          if (data?.id) editsUpTo = Math.max(editsUpTo, Number(data.id));
+        });
     },
-    sendEdit: (edit) => send({ t: "edit", ...edit }),
-    sendHit: (targetId, amount) => send({ t: "hit", target: targetId, amount }),
-    sendDamage: (amount) => send({ t: "damage", amount }),
+    sendHit: (targetId, amount) => {
+      push("hit", { target: targetId, amount, from: CLIENT_ID } satisfies HitBroadcast);
+    },
+    sendDrops: (position, items) => {
+      if (!items.length) return;
+      push("drops", { ...position, items } satisfies DropsBroadcast);
+    },
+    sendPickup: (id) => {
+      push("pickup", { id } satisfies PickupBroadcast);
+    },
+    sendDamage: (amount) => takeDamage(amount, null),
     setName: (next) => {
       name = next;
-      send({ t: "name", name: next });
+      if (connected) void channel.track({ id: CLIENT_ID, name });
     },
     dispose: () => {
       disposed = true;
+      connected = false;
       stopTicker();
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
-      const current = socket;
-      socket = null;
-      open = false;
-      current?.close();
+      void supabase.removeChannel(channel);
     },
   };
 }
