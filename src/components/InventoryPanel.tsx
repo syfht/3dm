@@ -1,175 +1,168 @@
-import type { BlockType } from "./voxelWorld";
-import { BLOCK_TYPES } from "./voxelWorld";
+import { useRef, useState } from "react";
+import { BLOCK_LABEL, HOTBAR_SIZE, craftResult, type Slot } from "./inventory";
+import PlayerPreview from "./PlayerPreview";
 
-export type ToolKind = "sword" | "pickaxe" | "axe" | "shovel" | "hoe";
-export type ToolMaterial = "wooden" | "stone";
-export type ToolType = `${ToolMaterial}_${ToolKind}`;
-
-export type ItemType = BlockType | "stick" | ToolType;
-
-export type Slot = { type: ItemType; count: number } | null;
-
-export const HOTBAR_SIZE = 9;
-export const INVENTORY_SIZE = 36; // 4 rows x 9 columns (row 0 is the hotbar)
-export const STACK_LIMIT = 64;
-
-const PLACEABLE = new Set<string>(BLOCK_TYPES);
-export const isPlaceable = (type: ItemType): type is BlockType => PLACEABLE.has(type);
-
-// Tools never stack in Minecraft.
-export const maxStack = (type: ItemType) => (isPlaceable(type) || type === "stick" ? STACK_LIMIT : 1);
-
-export const BLOCK_LABEL: Record<ItemType, string> = {
-  grass: "Grass Block",
-  stone: "Cobblestone",
-  wood: "Wood Log",
-  leaves: "Leaves",
-  planks: "Planks",
-  crafting_table: "Crafting Table",
-  chest: "Chest",
-  furnace: "Furnace",
-  stick: "Stick",
-  wooden_sword: "Wooden Sword",
-  wooden_pickaxe: "Wooden Pickaxe",
-  wooden_axe: "Wooden Axe",
-  wooden_shovel: "Wooden Shovel",
-  wooden_hoe: "Wooden Hoe",
-  stone_sword: "Stone Sword",
-  stone_pickaxe: "Stone Pickaxe",
-  stone_axe: "Stone Axe",
-  stone_shovel: "Stone Shovel",
-  stone_hoe: "Stone Hoe",
+type Props = {
+  title: string;
+  largeGrid?: boolean;
+  inventory: Slot[];
+  craftGrid: Slot[];
+  chestSlots?: Slot[];
+  cursor: Slot;
+  cursorPos: { x: number; y: number };
+  onSlotClick: (area: "inv" | "craft" | "chest", index: number, right: boolean) => void;
+  onTakeResult: (right: boolean) => void;
+  onClose: () => void;
+  onCursorMove: (x: number, y: number) => void;
 };
 
-// Seconds of continuous mining needed to break each block (bare hands).
-export const BREAK_TIMES: Record<BlockType, number> = {
-  grass: 0.95,
-  stone: 7.5,
-  wood: 3.6,
-  leaves: 0.3,
-  planks: 1.2,
-  crafting_table: 1.4,
-  chest: 1.6,
-  furnace: 6.5,
-};
-
-// Which tool speeds up which block, and by how much.
-const TOOL_TARGETS: Record<ToolKind, BlockType[]> = {
-  pickaxe: ["stone", "furnace"],
-  axe: ["wood", "planks", "crafting_table", "chest"],
-  shovel: ["grass"],
-  sword: ["leaves"],
-  hoe: [],
-};
-
-const MATERIAL_SPEED: Record<ToolMaterial, number> = { wooden: 2, stone: 4 };
-
-export function miningSpeed(held: ItemType | null, block: BlockType) {
-  if (!held || isPlaceable(held) || held === "stick") return 1;
-  const [material, kind] = held.split("_") as [ToolMaterial, ToolKind];
-  return TOOL_TARGETS[kind].includes(block) ? MATERIAL_SPEED[material] : 1;
+function SlotIcon({ slot }: { slot: Slot }) {
+  if (!slot) return null;
+  return (
+    <>
+      <span className={`block-icon is-${slot.type}`} aria-hidden="true" />
+      {slot.count > 1 ? <span className="slot-count">{slot.count}</span> : null}
+    </>
+  );
 }
 
-// --- crafting ---------------------------------------------------------------
-// Patterns use: '#' tool material (planks or cobblestone), 'S' stick,
-// 'P' planks, ' ' empty.
+export default function InventoryPanel({
+  title,
+  largeGrid = false,
+  inventory,
+  craftGrid,
+  chestSlots,
+  cursor,
+  cursorPos,
+  onSlotClick,
+  onTakeResult,
+  onClose,
+  onCursorMove,
+}: Props) {
+  const result = craftResult(craftGrid);
+  // Touch devices have no right-click: "one at a time" mode makes every tap
+  // behave like a right-click (split a stack / drop a single item per cell),
+  // and a long press does the same without switching mode.
+  const [singleMode, setSingleMode] = useState(false);
+  const pressTimer = useRef<number | null>(null);
+  const longFired = useRef(false);
 
-type Recipe = {
-  rows: string[];
-  result: (material: ToolMaterial) => { type: ItemType; count: number };
-};
-
-const toolRecipes: Recipe[] = [
-  { rows: ["#", "#", "S"], result: (m) => ({ type: `${m}_sword`, count: 1 }) },
-  { rows: ["###", " S ", " S "], result: (m) => ({ type: `${m}_pickaxe`, count: 1 }) },
-  { rows: ["##", "#S", " S"], result: (m) => ({ type: `${m}_axe`, count: 1 }) },
-  { rows: ["##", "S#", "S "], result: (m) => ({ type: `${m}_axe`, count: 1 }) },
-  { rows: ["#", "S", "S"], result: (m) => ({ type: `${m}_shovel`, count: 1 }) },
-  { rows: ["##", " S", " S"], result: (m) => ({ type: `${m}_hoe`, count: 1 }) },
-  { rows: ["##", "S ", "S "], result: (m) => ({ type: `${m}_hoe`, count: 1 }) },
-];
-
-const plainRecipes: Array<{ rows: string[]; result: { type: ItemType; count: number } }> = [
-  { rows: ["P", "P"], result: { type: "stick", count: 4 } },
-  { rows: ["PP", "PP"], result: { type: "crafting_table", count: 1 } },
-  { rows: ["PPP", "P P", "PPP"], result: { type: "chest", count: 1 } },
-  // 8 cobblestone in a ring -> furnace
-  { rows: ["CCC", "C C", "CCC"], result: { type: "furnace", count: 1 } },
-];
-
-// Trim empty rows/columns so a recipe can sit anywhere in the grid.
-function trimmed(grid: Slot[]) {
-  const size = grid.length === 9 ? 3 : 2;
-  const cell = (r: number, c: number) => grid[r * size + c] ?? null;
-  let top = size;
-  let bottom = -1;
-  let left = size;
-  let right = -1;
-  for (let r = 0; r < size; r += 1) {
-    for (let c = 0; c < size; c += 1) {
-      if (!cell(r, c)) continue;
-      top = Math.min(top, r);
-      bottom = Math.max(bottom, r);
-      left = Math.min(left, c);
-      right = Math.max(right, c);
+  const clearTimer = () => {
+    if (pressTimer.current !== null) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
     }
-  }
-  if (bottom < 0) return null;
-  const rows: Array<Array<Slot>> = [];
-  for (let r = top; r <= bottom; r += 1) {
-    const row: Slot[] = [];
-    for (let c = left; c <= right; c += 1) row.push(cell(r, c));
-    rows.push(row);
-  }
-  return rows;
-}
+  };
 
-function matches(rows: Array<Array<Slot>>, pattern: string[], material: ItemType) {
-  if (rows.length !== pattern.length) return false;
-  for (let r = 0; r < rows.length; r += 1) {
-    const line = pattern[r]!;
-    const row = rows[r]!;
-    if (row.length !== line.length) return false;
-    for (let c = 0; c < row.length; c += 1) {
-      const slot = row[c] ?? null;
-      const symbol = line[c];
-      const want =
-        symbol === " "
-          ? null
-          : symbol === "S"
-            ? "stick"
-            : symbol === "P"
-              ? "planks"
-              : symbol === "C"
-                ? "stone"
-                : material;
-      if (want === null) {
-        if (slot) return false;
-      } else if (!slot || slot.type !== want) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
+  const pressHandlers = (act: (right: boolean) => void) => ({
+    onPointerDown: (event: React.PointerEvent) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      longFired.current = false;
+      clearTimer();
+      pressTimer.current = window.setTimeout(() => {
+        longFired.current = true;
+        act(true);
+      }, 420);
+    },
+    onPointerUp: (event: React.PointerEvent) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      clearTimer();
+      if (longFired.current) return;
+      act(singleMode);
+    },
+    onPointerLeave: () => {
+      clearTimer();
+      longFired.current = true;
+    },
+    onPointerCancel: () => {
+      clearTimer();
+      longFired.current = true;
+    },
+    onContextMenu: (event: React.MouseEvent) => {
+      event.preventDefault();
+      clearTimer();
+      act(true);
+    },
+  });
 
-export function craftResult(grid: Slot[]): Slot {
-  const filled = grid.filter((slot): slot is NonNullable<Slot> => Boolean(slot));
-  if (filled.length === 0) return null;
-  // Shapeless: 1 log -> 4 planks.
-  if (filled.length === 1 && filled[0]!.type === "wood") return { type: "planks", count: 4 };
+  const slotButton = (slot: Slot, area: "inv" | "craft" | "chest", index: number) => (
+    <button
+      key={`${area}-${index}`}
+      type="button"
+      className="inv-slot"
+      aria-label={slot ? `${BLOCK_LABEL[slot.type]} x${slot.count}` : "Empty slot"}
+      {...pressHandlers((right) => onSlotClick(area, index, right))}
+    >
+      <SlotIcon slot={slot} />
+    </button>
+  );
 
-  const rows = trimmed(grid);
-  if (!rows) return null;
+  return (
+    <div
+      className="inventory-overlay"
+      onMouseMove={(event) => onCursorMove(event.clientX, event.clientY)}
+      onPointerMove={(event) => onCursorMove(event.clientX, event.clientY)}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="inventory-panel" role="dialog" aria-label={title}>
+        <header className="inventory-head">
+          <h2>{title}</h2>
+          <button
+            type="button"
+            className="inventory-close"
+            aria-pressed={singleMode}
+            onClick={() => setSingleMode((value) => !value)}
+          >
+            {singleMode ? "One at a time: ON" : "One at a time: OFF"}
+          </button>
+          <button type="button" className="inventory-close" onClick={onClose}>
+            Close
+          </button>
+        </header>
 
-  for (const recipe of plainRecipes) {
-    if (matches(rows, recipe.rows, "planks")) return { ...recipe.result };
-  }
-  for (const recipe of toolRecipes) {
-    for (const material of ["wooden", "stone"] as ToolMaterial[]) {
-      const blockType: ItemType = material === "wooden" ? "planks" : "stone";
-      if (matches(rows, recipe.rows, blockType)) return recipe.result(material);
-    }
-  }
-  return null;
+        <section className="crafting-row" aria-label="Crafting">
+          <div className={largeGrid ? "craft-grid is-3x3" : "craft-grid"}>
+            {craftGrid.map((slot, index) => slotButton(slot, "craft", index))}
+          </div>
+          <span className="craft-arrow" aria-hidden="true">
+            →
+          </span>
+          <button
+            type="button"
+            className="inv-slot is-result"
+            aria-label={result ? `Craft ${BLOCK_LABEL[result.type]} x${result.count}` : "No recipe"}
+            {...pressHandlers((right) => onTakeResult(right))}
+          >
+            <SlotIcon slot={result} />
+          </button>
+          <PlayerPreview />
+        </section>
+
+        {chestSlots ? (
+          <div className="inv-grid" aria-label="Chest">
+            {chestSlots.map((slot, index) => slotButton(slot, "chest", index))}
+          </div>
+        ) : null}
+
+        <div className="inv-grid" aria-label="Storage">
+          {inventory.slice(HOTBAR_SIZE).map((slot, offset) => slotButton(slot, "inv", offset + HOTBAR_SIZE))}
+        </div>
+
+        <div className="inv-grid is-hotbar" aria-label="Hotbar">
+          {inventory.slice(0, HOTBAR_SIZE).map((slot, index) => slotButton(slot, "inv", index))}
+        </div>
+
+        <p className="inventory-hint">
+          Tap to move a whole stack · long-press (or right-click) to place one item per cell
+        </p>
+      </div>
+
+      {cursor ? (
+        <div className="cursor-stack" style={{ left: cursorPos.x, top: cursorPos.y }} aria-hidden="true">
+          <span className={`block-icon is-${cursor.type}`} />
+          {cursor.count > 1 ? <span className="slot-count">{cursor.count}</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
 }
