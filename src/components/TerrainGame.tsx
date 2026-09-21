@@ -3,6 +3,17 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import modelAsset from "@/assets/mai_shiranui_kof_xv.glb.asset.json";
 import { createVoxelWorld, type BlockType } from "./voxelWorld";
+import InventoryPanel from "./InventoryPanel";
+import MobileControls from "./MobileControls";
+import {
+  BLOCK_LABEL,
+  BREAK_TIMES,
+  HOTBAR_SIZE,
+  INVENTORY_SIZE,
+  STACK_LIMIT,
+  craftResult,
+  type Slot,
+} from "./inventory";
 
 const MODEL_URL = modelAsset.url;
 
@@ -45,20 +56,162 @@ function findBone(root: THREE.Object3D, partial: string) {
 }
 
 
-const HOTBAR_SIZE = 9;
-const STACK_LIMIT = 64;
-type Slot = { type: BlockType; count: number } | null;
-const BLOCK_LABEL: Record<BlockType, string> = { grass: "Grass Block" };
-
 export default function TerrainGame() {
   const hostRef = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState(false);
   const [moving, setMoving] = useState(false);
   const [attackLabel, setAttackLabel] = useState<string | null>(null);
-  const [slots, setSlots] = useState<Slot[]>(() => Array.from({ length: HOTBAR_SIZE }, () => null));
+  const [inventory, setInventory] = useState<Slot[]>(() =>
+    Array.from({ length: INVENTORY_SIZE }, () => null),
+  );
   const [selectedSlot, setSelectedSlot] = useState(0);
-  const slotsRef = useRef<Slot[]>(slots);
+  const [invOpen, setInvOpen] = useState(false);
+  const [craftGrid, setCraftGrid] = useState<Slot[]>(() => [null, null, null, null]);
+  const [cursor, setCursor] = useState<Slot>(null);
+  const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
+  const invRef = useRef<Slot[]>(inventory);
+  const craftRef = useRef<Slot[]>(craftGrid);
+  const cursorRef = useRef<Slot>(null);
   const selectedRef = useRef(0);
+  const invOpenRef = useRef(false);
+
+  const syncInventory = () => setInventory([...invRef.current]);
+  const syncCraft = () => setCraftGrid([...craftRef.current]);
+
+  // Merge a stack into the inventory, filling partial stacks first.
+  const addStack = (type: BlockType, count: number) => {
+    const list = invRef.current;
+    let left = count;
+    for (let index = 0; index < list.length && left > 0; index += 1) {
+      const slot = list[index];
+      if (slot && slot.type === type && slot.count < STACK_LIMIT) {
+        const move = Math.min(left, STACK_LIMIT - slot.count);
+        list[index] = { type, count: slot.count + move };
+        left -= move;
+      }
+    }
+    for (let index = 0; index < list.length && left > 0; index += 1) {
+      if (list[index] === null) {
+        const move = Math.min(left, STACK_LIMIT);
+        list[index] = { type, count: move };
+        left -= move;
+      }
+    }
+    syncInventory();
+  };
+
+  const handleSlotClick = (area: "inv" | "craft", index: number, right: boolean) => {
+    const list = area === "inv" ? invRef.current : craftRef.current;
+    const slot = list[index] ?? null;
+    let held = cursorRef.current;
+    if (!held) {
+      if (!slot) return;
+      if (right) {
+        const take = Math.ceil(slot.count / 2);
+        held = { type: slot.type, count: take };
+        const rest = slot.count - take;
+        list[index] = rest > 0 ? { type: slot.type, count: rest } : null;
+      } else {
+        held = slot;
+        list[index] = null;
+      }
+    } else if (!slot) {
+      if (right) {
+        list[index] = { type: held.type, count: 1 };
+        held = held.count > 1 ? { type: held.type, count: held.count - 1 } : null;
+      } else {
+        list[index] = held;
+        held = null;
+      }
+    } else if (slot.type === held.type) {
+      if (right) {
+        if (slot.count < STACK_LIMIT) {
+          list[index] = { type: slot.type, count: slot.count + 1 };
+          held = held.count > 1 ? { type: held.type, count: held.count - 1 } : null;
+        }
+      } else {
+        const move = Math.min(held.count, STACK_LIMIT - slot.count);
+        list[index] = { type: slot.type, count: slot.count + move };
+        held = held.count - move > 0 ? { type: held.type, count: held.count - move } : null;
+      }
+    } else if (!right) {
+      list[index] = held;
+      held = slot;
+    }
+    cursorRef.current = held;
+    setCursor(held);
+    if (area === "inv") syncInventory();
+    else syncCraft();
+  };
+
+  const handleTakeResult = (right: boolean) => {
+    const result = craftResult(craftRef.current);
+    if (!result) return;
+    const held = cursorRef.current;
+    if (held && (held.type !== result.type || held.count + result.count > STACK_LIMIT)) return;
+    // Consume one item from every filled crafting cell.
+    craftRef.current = craftRef.current.map((slot) =>
+      slot ? (slot.count > 1 ? { type: slot.type, count: slot.count - 1 } : null) : null,
+    );
+    syncCraft();
+    if (right) {
+      addStack(result.type, result.count);
+      return;
+    }
+    const next: Slot = held
+      ? { type: held.type, count: held.count + result.count }
+      : { type: result.type, count: result.count };
+    cursorRef.current = next;
+    setCursor(next);
+  };
+
+  // Closing returns the cursor stack and crafting grid to the inventory.
+  const closeInventory = () => {
+    const held = cursorRef.current;
+    if (held) addStack(held.type, held.count);
+    cursorRef.current = null;
+    setCursor(null);
+    craftRef.current.forEach((slot, index) => {
+      if (slot) addStack(slot.type, slot.count);
+      craftRef.current[index] = null;
+    });
+    syncCraft();
+    invOpenRef.current = false;
+    setInvOpen(false);
+  };
+
+  const openInventory = () => {
+    if (invOpenRef.current) return;
+    invOpenRef.current = true;
+    setInvOpen(true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  };
+
+  // Touch control bridge: the render loop reads these each frame.
+  const touchMoveRef = useRef({ x: 0, y: 0 });
+  const touchJumpRef = useRef(false);
+  const touchPlaceRef = useRef(false);
+  const [isTouch, setIsTouch] = useState(false);
+  const [portrait, setPortrait] = useState(false);
+
+  useEffect(() => {
+    const coarse = window.matchMedia("(pointer: coarse)");
+    const tall = window.matchMedia("(orientation: portrait)");
+    const sync = () => {
+      setIsTouch(coarse.matches);
+      setPortrait(coarse.matches && tall.matches);
+    };
+    sync();
+    coarse.addEventListener("change", sync);
+    tall.addEventListener("change", sync);
+    return () => {
+      coarse.removeEventListener("change", sync);
+      tall.removeEventListener("change", sync);
+    };
+  }, []);
+
+
+
 
 
   useEffect(() => {
@@ -98,27 +251,13 @@ export default function TerrainGame() {
     const world = createVoxelWorld(scene);
 
     // --- inventory -----------------------------------------------------------
-    const syncSlots = () => setSlots([...slotsRef.current]);
-    const addToInventory = (type: BlockType) => {
-      const list = slotsRef.current;
-      const stack = list.findIndex((slot) => slot?.type === type && slot.count < STACK_LIMIT);
-      if (stack >= 0) {
-        list[stack] = { type, count: list[stack]!.count + 1 };
-        syncSlots();
-        return;
-      }
-      const empty = list.findIndex((slot) => slot === null);
-      if (empty >= 0) {
-        list[empty] = { type, count: 1 };
-        syncSlots();
-      }
-    };
+    const addToInventory = (type: BlockType) => addStack(type, 1);
     const takeFromInventory = (index: number) => {
-      const slot = slotsRef.current[index];
+      const slot = invRef.current[index];
       if (!slot) return false;
       const next = slot.count - 1;
-      slotsRef.current[index] = next > 0 ? { type: slot.type, count: next } : null;
-      syncSlots();
+      invRef.current[index] = next > 0 ? { type: slot.type, count: next } : null;
+      setInventory([...invRef.current]);
       return true;
     };
     const lastAimOrigin = new THREE.Vector3();
@@ -142,7 +281,8 @@ export default function TerrainGame() {
     let cameraDistance = 4.2;
     let firstPersonView = false;
     // A full voxel can be stepped onto; the model eases up visually below.
-    const STEP_HEIGHT = 1.05;
+    const STEP_TOLERANCE = 0.02; // only float noise: no automatic step-up onto higher blocks
+    const STEP_CLIMB_SPEED = 4.2; // blocks per second when the ground rises under a standing player
     type AttackMode = "punch" | "combo" | "kick";
     type PoseMap = Map<THREE.Object3D, THREE.Quaternion>;
     const ATTACK_DURATIONS: Record<AttackMode, number> = { punch: 0.72, combo: 1.3, kick: 0.9 };
@@ -154,7 +294,6 @@ export default function TerrainGame() {
     let miningProgress = 0;
     let miningBlock: [number, number, number] | null = null;
     let attackBonus = 0;
-    const BREAK_TIME = 0.95;
 
     let windupPose: PoseMap | undefined;
     let strikePose: PoseMap | undefined;
@@ -163,6 +302,11 @@ export default function TerrainGame() {
     let kickWindupPose: PoseMap | undefined;
     let kickStrikePose: PoseMap | undefined;
     let airbornePose: PoseMap | undefined;
+    // Held item: one block mesh per type, parented to the right hand.
+    let handAttach: THREE.Object3D | null = null;
+    let handScale = 1;
+    const heldMeshes = new Map<BlockType, THREE.Mesh>();
+    let heldType: BlockType | null = null;
 
     let previousSpeed = 0;
     let previousVerticalVelocity = 0;
@@ -205,6 +349,14 @@ export default function TerrainGame() {
       for (const [key, value] of Object.entries(BONE_NAMES)) {
         const bone = findBone(loadedModel, value);
         if (bone) bones[key as keyof typeof BONE_NAMES] = bone;
+      }
+
+      // Held block: shows the selected hotbar block in the right hand.
+      const handBone = findBone(loadedModel, "R_Hand_Attach") ?? findBone(loadedModel, "R_Hand_");
+      if (handBone) {
+        handBone.updateWorldMatrix(true, false);
+        handAttach = handBone;
+        handScale = handBone.getWorldScale(new THREE.Vector3()).x || 1;
       }
 
       // The GLB ships in a T-pose with no animation clips, so bake a relaxed
@@ -303,17 +455,15 @@ export default function TerrainGame() {
         [bones.rightLowerLeg, () => new THREE.Vector3(0, 0.05, 1)],
       ]);
 
-      // Airborne balance pose: arms spread horizontally and legs opened apart.
+      // Airborne balance pose for the arms only; the legs are driven
+      // procedurally each frame so the whole limb swings, not just the feet.
       airbornePose = capturePose([
-        [bones.leftUpperArm, (_d, side) => new THREE.Vector3(side, 0.04, 0.02)],
-        [bones.rightUpperArm, (_d, side) => new THREE.Vector3(side, 0.04, 0.02)],
-        [bones.leftLowerArm, (_d, side) => new THREE.Vector3(side, -0.02, 0.02)],
-        [bones.rightLowerArm, (_d, side) => new THREE.Vector3(side, -0.02, 0.02)],
-        [bones.leftUpperLeg, () => new THREE.Vector3(-0.58, -0.81, 0.05)],
-        [bones.rightUpperLeg, () => new THREE.Vector3(0.58, -0.81, 0.05)],
-        [bones.leftLowerLeg, () => new THREE.Vector3(-0.2, -0.97, 0.08)],
-        [bones.rightLowerLeg, () => new THREE.Vector3(0.2, -0.97, 0.08)],
+        [bones.leftUpperArm, (_d, side) => new THREE.Vector3(side * 0.62, 0.62, -0.2)],
+        [bones.rightUpperArm, (_d, side) => new THREE.Vector3(side * 0.7, 0.3, 0.2)],
+        [bones.leftLowerArm, (_d, side) => new THREE.Vector3(side * 0.3, 0.92, 0.1)],
+        [bones.rightLowerArm, (_d, side) => new THREE.Vector3(side * 0.35, 0.6, 0.4)],
       ]);
+
 
       loadedModel.traverse((node) => {
         const isHair = /Hair\d.*Sec/.test(node.name);
@@ -377,6 +527,21 @@ export default function TerrainGame() {
     });
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // T opens/closes the inventory; while it is open the world ignores input.
+      if (event.code === "KeyT" || (event.code === "Escape" && invOpenRef.current)) {
+        event.preventDefault();
+        if (invOpenRef.current) {
+          closeInventory();
+        } else {
+          for (const code of Object.keys(keys)) keys[code] = false;
+          miningHeld = false;
+          invOpenRef.current = true;
+          setInvOpen(true);
+          if (document.pointerLockElement) document.exitPointerLock();
+        }
+        return;
+      }
+      if (invOpenRef.current) return;
       keys[event.code] = true;
       if (event.code === "Quote") {
         firstPersonView = !firstPersonView;
@@ -397,24 +562,35 @@ export default function TerrainGame() {
     const onKeyUp = (event: KeyboardEvent) => {
       keys[event.code] = false;
     };
+    // Touch look: dragging the screen turns the camera, a still hold mines.
+    const touchLook = { id: -1, x: 0, y: 0, moved: 0 };
+    const placeSelected = () => {
+      const stack = invRef.current[selectedRef.current];
+      if (!stack) return false;
+      const placed = world.placeBlock(
+        lastAimOrigin,
+        lastAimDirection,
+        firstPersonView ? 5.5 : 3.6,
+        character.position,
+        stack.type,
+      );
+      if (placed) takeFromInventory(selectedRef.current);
+      return placed;
+    };
     const onPointerDown = (event: PointerEvent) => {
-      if (document.pointerLockElement !== renderer.domElement) {
+      if (invOpenRef.current) return;
+      const touch = event.pointerType !== "mouse";
+      if (touch) {
+        touchLook.id = event.pointerId;
+        touchLook.x = event.clientX;
+        touchLook.y = event.clientY;
+        touchLook.moved = 0;
+      } else if (document.pointerLockElement !== renderer.domElement) {
         renderer.domElement.requestPointerLock();
       }
       if (event.button === 0) miningHeld = true;
       // Right click places the selected block when the hotbar slot holds one.
-      if (event.button === 2 && slotsRef.current[selectedRef.current]) {
-        const placed = world.placeBlock(
-          lastAimOrigin,
-          lastAimDirection,
-          firstPersonView ? 5.5 : 3.6,
-          character.position,
-        );
-        if (placed) {
-          takeFromInventory(selectedRef.current);
-          return;
-        }
-      }
+      if (event.button === 2 && placeSelected()) return;
       if (attackTime > 0) return;
       if (event.button === 0) {
         attackMode = event.detail >= 2 ? "combo" : "punch";
@@ -444,14 +620,32 @@ export default function TerrainGame() {
       // Vertical: same direction in both views (mouse up = look up).
       cameraPitch = THREE.MathUtils.clamp(cameraPitch + event.movementY * 0.0018, minPitch, maxPitch);
     };
+    const onTouchMove = (event: PointerEvent) => {
+      if (event.pointerId !== touchLook.id) return;
+      event.preventDefault();
+      const dx = event.clientX - touchLook.x;
+      const dy = event.clientY - touchLook.y;
+      touchLook.x = event.clientX;
+      touchLook.y = event.clientY;
+      touchLook.moved += Math.hypot(dx, dy);
+      // A deliberate drag is a look, not a mine.
+      if (touchLook.moved > 14) miningHeld = false;
+      cameraYaw -= dx * 0.005;
+      const minPitch = firstPersonView ? -1.2 : -0.08;
+      const maxPitch = firstPersonView ? 1.2 : 0.72;
+      cameraPitch = THREE.MathUtils.clamp(cameraPitch + dy * 0.004, minPitch, maxPitch);
+    };
     const onPointerUp = (event: PointerEvent) => {
+      if (event.pointerId === touchLook.id) touchLook.id = -1;
       if (event.button === 0) miningHeld = false;
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     document.addEventListener("mousemove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointermove", onTouchMove, { passive: false });
     renderer.domElement.addEventListener("contextmenu", onContextMenu);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
@@ -466,19 +660,38 @@ export default function TerrainGame() {
     const animate = () => {
       animationFrame = requestAnimationFrame(animate);
       const delta = Math.min(clock.getDelta(), 0.035);
-      const forward = Number(Boolean(keys["KeyW"] || keys["ArrowUp"])) - Number(Boolean(keys["KeyS"] || keys["ArrowDown"]));
-      const strafe = Number(Boolean(keys["KeyD"] || keys["ArrowRight"])) - Number(Boolean(keys["KeyA"] || keys["ArrowLeft"]));
+      // Touch buttons queue a jump / place for the next frame.
+      if (touchJumpRef.current) {
+        touchJumpRef.current = false;
+        if (grounded && !invOpenRef.current) {
+          verticalVelocity = 5.4;
+          grounded = false;
+        }
+      }
+      if (touchPlaceRef.current) {
+        touchPlaceRef.current = false;
+        if (!invOpenRef.current) placeSelected();
+      }
+      const stick = touchMoveRef.current;
+      const forward =
+        Number(Boolean(keys["KeyW"] || keys["ArrowUp"])) -
+        Number(Boolean(keys["KeyS"] || keys["ArrowDown"])) -
+        stick.y;
+      const strafe =
+        Number(Boolean(keys["KeyD"] || keys["ArrowRight"])) -
+        Number(Boolean(keys["KeyA"] || keys["ArrowLeft"])) +
+        stick.x;
       const inputLength = Math.hypot(forward, strafe);
       const sprinting = Boolean(keys["ShiftLeft"] || keys["ShiftRight"]);
-      const speed = inputLength > 0 ? (sprinting ? 5.2 : 2.7) : 0;
+      const speed = inputLength > 0.12 ? (sprinting ? 5.2 : 2.7) * Math.min(1, inputLength) : 0;
       const direction = new THREE.Vector3(strafe, 0, -forward);
-      if (inputLength > 0) {
+      if (speed > 0) {
         direction.normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
-        // No auto-jump: a column more than one small step above the feet blocks movement.
+        // No auto-jump: any column above the feet blocks movement until the player jumps.
         const step = speed * delta;
         const feetY = character.position.y;
         const canStand = (x: number, z: number) =>
-          world.groundHeight(x, z) <= feetY + STEP_HEIGHT;
+          world.groundHeight(x, z) <= feetY + STEP_TOLERANCE;
         const nextX = character.position.x + direction.x * step;
         const nextZ = character.position.z + direction.z * step;
         if (canStand(nextX, character.position.z)) character.position.x = nextX;
@@ -502,12 +715,16 @@ export default function TerrainGame() {
       const groundY = world.groundHeight(character.position.x, character.position.z);
       if (character.position.y <= groundY) {
         const heightCorrection = groundY - character.position.y;
-        if (grounded && heightCorrection > 0.08) {
-          visualStepOffset -= Math.min(heightCorrection, STEP_HEIGHT);
-        } else if (!grounded && verticalVelocity < -2.2) {
-          landingImpact = THREE.MathUtils.clamp(-verticalVelocity - 2.2, 0, 8);
+        if (grounded && heightCorrection > 0.02) {
+          // Climb onto the higher block over a few frames instead of teleporting.
+          const climb = Math.min(heightCorrection, STEP_CLIMB_SPEED * delta);
+          character.position.y += climb;
+        } else {
+          if (!grounded && verticalVelocity < -2.2) {
+            landingImpact = THREE.MathUtils.clamp(-verticalVelocity - 2.2, 0, 8);
+          }
+          character.position.y = groundY;
         }
-        character.position.y = groundY;
         verticalVelocity = 0;
         grounded = true;
       } else {
@@ -613,18 +830,44 @@ export default function TerrainGame() {
       airborneBlend = THREE.MathUtils.lerp(
         airborneBlend,
         grounded ? 0 : 1,
-        1 - Math.exp(-delta * (grounded ? 12 : 9)),
+        1 - Math.exp(-delta * (grounded ? 14 : 16)),
       );
-      if (airbornePose && airborneBlend > 0.001) {
-        airbornePose.forEach((quaternion, bone) => {
-          bone.quaternion.slerp(quaternion, airborneBlend);
-        });
+      // Jump pose: hips, thighs, knees and feet all move. Knees tuck up on the
+      // way up, then the legs reach down for the landing on the way down.
+      let jumpLean = 0;
+      if (airborneBlend > 0.001) {
+        const rise = THREE.MathUtils.clamp(verticalVelocity / 5.4, 0, 1);
+        const fall = THREE.MathUtils.clamp(-verticalVelocity / 5.4, 0, 1);
+        const blend = airborneBlend;
+        jumpLean = (0.16 * rise - 0.1 * fall) * blend;
+        const blendBone = (bone: THREE.Object3D | undefined, x: number, y = 0, z = 0) => {
+          if (!bone) return;
+          const rest = restRotations.get(bone);
+          if (!rest) return;
+          const target = rest
+            .clone()
+            .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z)));
+          bone.quaternion.slerp(target, blend);
+        };
+        // Lead leg tucks high, trail leg trails behind and straightens sooner.
+        blendBone(bones.leftUpperLeg, 0.85 * rise + 0.1 * fall, 0, -0.14);
+        blendBone(bones.rightUpperLeg, 0.42 * rise - 0.3 * fall, 0, 0.14);
+        blendBone(bones.leftLowerLeg, 1.15 * rise + 0.3 * fall, 0, 0);
+        blendBone(bones.rightLowerLeg, 0.7 * rise + 0.55 * fall, 0, 0);
+        blendBone(bones.leftFoot, -0.4 * rise + 0.25 * fall, 0, 0);
+        blendBone(bones.rightFoot, -0.5 * rise + 0.15 * fall, 0, 0);
+        if (airbornePose) {
+          airbornePose.forEach((quaternion, bone) => {
+            bone.quaternion.slerp(quaternion, blend);
+          });
+        }
       }
 
-      setBoneRotation(bones.hips, settle + leanBack * 0.4, gait * 0.045 * locomotion + twist * 0.5, Math.cos(walkTime) * 0.032 * locomotion + idleSway * 0.018);
-      setBoneRotation(bones.spine, -settle * 0.5 + leanBack, -gait * 0.032 * locomotion + twist * 0.7, -Math.cos(walkTime) * 0.018 * locomotion - idleSway * 0.012);
-      setBoneRotation(bones.chest, settle * 0.65, Math.sin(walkTime) * 0.025 * locomotion + twist * 0.5, idleSway * 0.007);
-      setBoneRotation(bones.head, -settle * 0.35, twist * 0.3, -idleSway * 0.006);
+      setBoneRotation(bones.hips, settle + leanBack * 0.4 + jumpLean * 0.5, gait * 0.045 * locomotion + twist * 0.5, Math.cos(walkTime) * 0.032 * locomotion + idleSway * 0.018);
+      setBoneRotation(bones.spine, -settle * 0.5 + leanBack - jumpLean, -gait * 0.032 * locomotion + twist * 0.7, -Math.cos(walkTime) * 0.018 * locomotion - idleSway * 0.012);
+      setBoneRotation(bones.chest, settle * 0.65 - jumpLean * 0.6, Math.sin(walkTime) * 0.025 * locomotion + twist * 0.5, idleSway * 0.007);
+      setBoneRotation(bones.head, -settle * 0.35 + jumpLean * 0.4, twist * 0.3, -idleSway * 0.006);
+
 
       visualStepOffset = THREE.MathUtils.lerp(visualStepOffset, 0, 1 - Math.exp(-delta * 11));
       if (model) {
@@ -733,8 +976,19 @@ export default function TerrainGame() {
         miningBlock = aimed;
         miningProgress = 0;
       }
+      // Keep swinging while the mouse stays held on a block. Chain the next
+      // punch as soon as the strike lands (skip the recovery pause) so the
+      // animation loops without dropping back to idle between swings.
+      const punchRecovery = ATTACK_DURATIONS.punch * 0.32;
+      if (miningHeld && miningBlock && (attackTime === 0 || (attackMode === "punch" && attackTime <= punchRecovery))) {
+        attackMode = "punch";
+        attackTime = ATTACK_DURATIONS.punch;
+        pendingHits = 1;
+        setAttackLabel("PUNCH");
+      }
       if (miningBlock && (miningHeld || attackBonus > 0)) {
-        if (miningHeld) miningProgress += delta / BREAK_TIME;
+        const miningType = world.blockTypeAt(miningBlock);
+        if (miningHeld) miningProgress += delta / (miningType ? BREAK_TIMES[miningType] : 0.95);
         miningProgress += attackBonus;
         attackBonus = 0;
         if (miningProgress >= 1) {
@@ -748,6 +1002,23 @@ export default function TerrainGame() {
         attackBonus = 0;
       }
       world.showBreakProgress(miningBlock, miningProgress);
+      // Show the selected stack's block in the character's hand.
+      const nextHeldType = invRef.current[selectedRef.current]?.type ?? null;
+      if (nextHeldType !== heldType) {
+        const previous = heldType ? heldMeshes.get(heldType) : null;
+        if (previous) previous.visible = false;
+        heldType = nextHeldType;
+        if (nextHeldType && handAttach) {
+          let mesh = heldMeshes.get(nextHeldType);
+          if (!mesh) {
+            mesh = world.makeBlockMesh(0.24, nextHeldType);
+            mesh.scale.setScalar(1 / handScale);
+            heldMeshes.set(nextHeldType, mesh);
+            handAttach.add(mesh);
+          }
+          mesh.visible = true;
+        }
+      }
 
       sun.position.x = character.position.x - 18;
       sun.position.z = character.position.z + 12;
@@ -776,7 +1047,9 @@ export default function TerrainGame() {
       window.removeEventListener("keyup", onKeyUp);
       document.removeEventListener("mousemove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointermove", onTouchMove);
       renderer.domElement.removeEventListener("contextmenu", onContextMenu);
       renderer.domElement.removeEventListener("wheel", onWheel);
       world.dispose();
@@ -796,11 +1069,7 @@ export default function TerrainGame() {
       </div>
 
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-5 sm:p-7">
-        <div>
-          <p className="game-kicker">OPEN TERRAIN / PROTOTYPE 01</p>
-          <h1 className="game-title">GALAXIA</h1>
-        </div>
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-end p-5 sm:p-7">
         <div className="game-status" aria-live="polite">
           <span className={loaded ? "status-light is-ready" : "status-light"} />
           {loaded ? (attackLabel ?? (moving ? "MOVING" : "READY")) : "LOADING MODEL"}
@@ -811,9 +1080,22 @@ export default function TerrainGame() {
         <div className="physics-badge"><span />SECONDARY MOTION</div>
       </div>
 
+      {invOpen ? (
+        <InventoryPanel
+          inventory={inventory}
+          craftGrid={craftGrid}
+          cursor={cursor}
+          cursorPos={cursorPos}
+          onSlotClick={handleSlotClick}
+          onTakeResult={handleTakeResult}
+          onClose={closeInventory}
+          onCursorMove={(x, y) => setCursorPos({ x, y })}
+        />
+      ) : null}
+
       <div className="hotbar-wrap">
         <div className="hotbar" role="list" aria-label="Inventory hotbar">
-          {slots.map((slot, index) => (
+          {inventory.slice(0, HOTBAR_SIZE).map((slot, index) => (
             <button
               key={index}
               type="button"
@@ -836,11 +1118,37 @@ export default function TerrainGame() {
           ))}
         </div>
         <p className="hotbar-hint">
-          {slots[selectedSlot]
-            ? `${BLOCK_LABEL[slots[selectedSlot]!.type]} — right-click to place`
-            : "Mine blocks to collect them"}
+          {isTouch
+            ? inventory[selectedSlot]
+              ? `${BLOCK_LABEL[inventory[selectedSlot]!.type]} — tap PLACE · hold screen to break`
+              : "Hold the screen to break blocks · drag to look"
+            : inventory[selectedSlot]
+              ? `${BLOCK_LABEL[inventory[selectedSlot]!.type]} — right-click to place · T for inventory`
+              : "Mine blocks to collect them · T for inventory"}
         </p>
       </div>
+
+      {isTouch && !invOpen ? (
+        <MobileControls
+          onMove={(x, y) => {
+            touchMoveRef.current = { x, y };
+          }}
+          onJump={() => {
+            touchJumpRef.current = true;
+          }}
+          onPlace={() => {
+            touchPlaceRef.current = true;
+          }}
+          onOpenInventory={openInventory}
+        />
+      ) : null}
+
+      {portrait ? (
+        <div className="rotate-notice" role="alert">
+          <span className="rotate-glyph" aria-hidden="true" />
+          Rotate your device to landscape to play
+        </div>
+      ) : null}
     </main>
   );
 }
