@@ -33,7 +33,7 @@ export default function PlayerPreview() {
     let disposed = false;
     new GLTFLoader().load(modelAsset.url, (gltf) => {
       if (disposed) return;
-      host.dataset.loaded = "true";
+      host.dataset["loaded"] = "true";
       model = gltf.scene;
       const box = new THREE.Box3().setFromObject(model);
       const size = box.getSize(new THREE.Vector3());
