@@ -6,6 +6,7 @@ type Props = {
   onPlace: () => void;
   onOpenCrafting: () => void;
   onOpenInventory: () => void;
+  showCrafting?: boolean;
 };
 
 const RADIUS = 46;
@@ -16,6 +17,7 @@ export default function MobileControls({
   onPlace,
   onOpenCrafting,
   onOpenInventory,
+  showCrafting = false,
 }: Props) {
   const padRef = useRef<HTMLDivElement>(null);
   const activeId = useRef<number | null>(null);
@@ -65,28 +67,33 @@ export default function MobileControls({
       </div>
 
       <div className="touch-buttons">
-        <button
-          type="button"
-          className="touch-btn"
-          aria-label="Open inventory"
-          onPointerDown={(event) => {
-            event.preventDefault();
-            onOpenInventory();
-          }}
-        >
-          BAG
-        </button>
-        <button
-          type="button"
-          className="touch-btn is-craft"
-          aria-label="Open crafting table"
-          onPointerDown={(event) => {
-            event.preventDefault();
-            onOpenCrafting();
-          }}
-        >
-          <span className="craft-glyph" aria-hidden="true" />
-        </button>
+        <div className="touch-row is-top">
+          <button
+            type="button"
+            className="touch-btn is-bag"
+            aria-label="Open inventory"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              onOpenInventory();
+            }}
+          >
+            BAG
+          </button>
+        </div>
+        <div className="touch-row">
+        {showCrafting ? (
+          <button
+            type="button"
+            className="touch-btn is-craft"
+            aria-label="Open crafting table"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              onOpenCrafting();
+            }}
+          >
+            <span className="craft-glyph" aria-hidden="true" />
+          </button>
+        ) : null}
         <button
           type="button"
           className="touch-btn"
@@ -109,6 +116,7 @@ export default function MobileControls({
         >
           JUMP
         </button>
+        </div>
       </div>
     </div>
   );
