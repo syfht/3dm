@@ -11,7 +11,6 @@ import {
   SCAN_HEIGHT,
   blockKey,
   generateTerrain,
-  groundHeightIn,
 } from "@/lib/terrain";
 
 type TextureKind =
@@ -29,7 +28,8 @@ type TextureKind =
   | "chest_side"
   | "chest_front"
   | "furnace_side"
-  | "furnace_front";
+  | "furnace_front"
+  | "ladder";
 
 function blockTexture(kind: TextureKind) {
   const size = 32;
@@ -102,6 +102,16 @@ function blockTexture(kind: TextureKind) {
       ctx.fillStyle = "rgba(78,78,82,0.9)";
       ctx.fillRect(6, 8, size - 12, 3);
     }
+  } else if (kind === "ladder") {
+    // Two rails with rungs between them; everything else stays see-through.
+    ctx.clearRect(0, 0, size, size);
+    const rail = "rgb(150,112,64)";
+    const rungDark = "rgb(122,88,48)";
+    ctx.fillStyle = rail;
+    ctx.fillRect(4, 0, 4, size);
+    ctx.fillRect(size - 8, 0, 4, size);
+    ctx.fillStyle = rungDark;
+    for (let y = 4; y < size; y += 8) ctx.fillRect(8, y, size - 16, 3);
   } else if (kind === "grass_side") {
     paintNoise(0, size, [128, 94, 62], 42);
     paintNoise(0, 8, [104, 158, 74], 46);
@@ -183,7 +193,8 @@ export type BlockType =
   | "planks"
   | "crafting_table"
   | "chest"
-  | "furnace";
+  | "furnace"
+  | "ladder";
 
 export const BLOCK_TYPES: BlockType[] = [
   "grass",
@@ -194,7 +205,11 @@ export const BLOCK_TYPES: BlockType[] = [
   "crafting_table",
   "chest",
   "furnace",
+  "ladder",
 ];
+
+/** Blocks you can walk through and climb instead of stand on. */
+export const CLIMBABLE: BlockType[] = ["ladder"];
 
 // A single block change made by a player (block === null means it was mined).
 export type WorldEdit = { x: number; y: number; z: number; block: BlockType | null };
@@ -223,10 +238,22 @@ export type VoxelWorld = {
   highlightBlock: (block: BlockCoord | null) => void;
   cameraClearance: (target: THREE.Vector3, toCamera: THREE.Vector3) => number;
   makeBlockMesh: (size: number, type?: BlockType) => THREE.Mesh;
+  dropItem: (
+    position: THREE.Vector3,
+    type: string,
+    count: number,
+    mesh: THREE.Object3D,
+    delayMs?: number,
+    id?: string,
+  ) => void;
+  /** Remove a dropped item (another player picked it up). */
+  removeDrop: (id: string) => void;
+  /** True when this cell holds a climbable block (a ladder). */
+  isClimbable: (x: number, y: number, z: number) => boolean;
   update: (
     delta: number,
     playerPosition?: THREE.Vector3,
-    onCollect?: (type: BlockType) => void,
+    onCollect?: (type: string, count: number, id: string) => void,
   ) => void;
   dispose: () => void;
 };
@@ -306,10 +333,18 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   const chestFront = mat("chest_front");
   const furnaceSide = mat("furnace_side");
   const furnaceFront = mat("furnace_front");
+  // Ladders are see-through between their rungs and visible from both sides.
+  const ladder = new THREE.MeshStandardMaterial({
+    map: blockTexture("ladder"),
+    roughness: 1,
+    transparent: true,
+    alphaTest: 0.5,
+    side: THREE.DoubleSide,
+  });
 
   const allMaterials = [
     grassTop, grassSide, dirt, woodTop, woodSide, leaves, planks, tableTop, tableSide,
-    stone, chestTop, chestSide, chestFront, furnaceSide, furnaceFront,
+    stone, chestTop, chestSide, chestFront, furnaceSide, furnaceFront, ladder,
   ];
 
   // material order: +x, -x, +y, -y, +z, -z
@@ -322,6 +357,7 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     crafting_table: [tableSide, tableSide, tableTop, planks, tableSide, tableSide],
     chest: [chestSide, chestSide, chestTop, chestTop, chestFront, chestSide],
     furnace: [furnaceSide, furnaceSide, stone, stone, furnaceFront, furnaceSide],
+    ladder: [ladder, ladder, ladder, ladder, ladder, ladder],
   };
 
   type Layer = { mesh: THREE.InstancedMesh; blocks: BlockCoord[]; capacity: number };
@@ -383,14 +419,36 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   // Highest solid top at or below fromY (defaults to a full top-down scan).
   // Passing the feet height keeps overhead blocks (tree canopies) from
   // counting as ground.
-  const groundHeight = (x: number, z: number, fromY = SCAN_HEIGHT) =>
-    groundHeightIn(solid, x, z, fromY);
+  // Ladders are walk-through, so they never count as ground (you climb them).
+  const groundHeight = (x: number, z: number, fromY = SCAN_HEIGHT) => {
+    const bx = Math.floor(x);
+    const bz = Math.floor(z);
+    for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
+      const type = solid.get(key(bx, y, bz));
+      if (type && !CLIMBABLE.includes(type)) return y + 1;
+    }
+    return 0;
+  };
+
+  const isClimbable = (x: number, y: number, z: number) => {
+    const type = solid.get(key(Math.floor(x), Math.floor(y), Math.floor(z)));
+    return Boolean(type && CLIMBABLE.includes(type));
+  };
 
   const blockTypeAt = (block: BlockCoord) => solid.get(key(block[0], block[1], block[2])) ?? null;
 
-  // --- dropped block items (collectable pickups) -----------------------------
+  // --- dropped items (collectable pickups) -----------------------------------
   const dropGeometry = new THREE.BoxGeometry(0.32, 0.32, 0.32);
-  type Drop = { mesh: THREE.Mesh; velocity: THREE.Vector3; bob: number; type: BlockType };
+  type Drop = {
+    id: string;
+    mesh: THREE.Object3D;
+    velocity: THREE.Vector3;
+    bob: number;
+    type: string;
+    count: number;
+    /** Pickups are ignored until this timestamp (so death drops can scatter). */
+    pickupAt: number;
+  };
   const drops: Drop[] = [];
 
   // Dropped items fall through foliage so they land on reachable ground
@@ -400,10 +458,12 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     const bz = Math.floor(z);
     for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
       const type = solid.get(key(bx, y, bz));
-      if (type && type !== "leaves") return y + 1;
+      if (type && type !== "leaves" && !CLIMBABLE.includes(type)) return y + 1;
     }
     return 0;
   };
+
+  const newDropId = () => `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 
   const spawnDrop = (block: BlockCoord, type: BlockType) => {
     const piece = new THREE.Mesh(dropGeometry, materialsByType[type]);
@@ -412,11 +472,45 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     piece.rotation.y = Math.random() * Math.PI;
     scene.add(piece);
     drops.push({
+      id: newDropId(),
       mesh: piece,
       velocity: new THREE.Vector3((Math.random() - 0.5) * 0.9, 2.1, (Math.random() - 0.5) * 0.9),
       bob: Math.random() * Math.PI * 2,
       type,
+      count: 1,
+      pickupAt: 0,
     });
+  };
+
+  /** Throw an arbitrary item (tool or block stack) into the world. */
+  const dropItem = (
+    position: THREE.Vector3,
+    type: string,
+    count: number,
+    mesh: THREE.Object3D,
+    delayMs = 1200,
+    id = newDropId(),
+  ) => {
+    mesh.position.copy(position);
+    mesh.rotation.y = Math.random() * Math.PI;
+    scene.add(mesh);
+    drops.push({
+      id,
+      mesh,
+      velocity: new THREE.Vector3((Math.random() - 0.5) * 2.4, 2.6, (Math.random() - 0.5) * 2.4),
+      bob: Math.random() * Math.PI * 2,
+      type,
+      count,
+      pickupAt: Date.now() + delayMs,
+    });
+  };
+
+  /** Another player picked this drop up: take it out of our world too. */
+  const removeDrop = (id: string) => {
+    const index = drops.findIndex((drop) => drop.id === id);
+    if (index < 0) return;
+    scene.remove(drops[index]!.mesh);
+    drops.splice(index, 1);
   };
 
   // --- break debris ---------------------------------------------------------
@@ -566,12 +660,13 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   const update = (
     delta: number,
     playerPosition?: THREE.Vector3,
-    onCollect?: (type: BlockType) => void,
+    onCollect?: (type: string, count: number, id: string) => void,
   ) => {
+    const now = Date.now();
     for (let index = drops.length - 1; index >= 0; index -= 1) {
       const drop = drops[index]!;
       const p = drop.mesh.position;
-      if (playerPosition) {
+      if (playerPosition && now >= drop.pickupAt) {
         const dx = playerPosition.x - p.x;
         const dy = playerPosition.y + 0.8 - p.y;
         const dz = playerPosition.z - p.z;
@@ -579,7 +674,7 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
         if (distance < 1.3) {
           scene.remove(drop.mesh);
           drops.splice(index, 1);
-          onCollect?.(drop.type);
+          onCollect?.(drop.type, drop.count, drop.id);
           continue;
         }
         if (distance < 4.2) {
@@ -666,6 +761,9 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     highlightBlock,
     cameraClearance,
     makeBlockMesh,
+    dropItem,
+    removeDrop,
+    isClimbable,
     update,
     dispose,
   };
