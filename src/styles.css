@@ -334,6 +334,47 @@
       linear-gradient(to bottom, oklch(0.68 0.13 140) 0 38%, oklch(0.52 0.07 62) 38% 100%);
   }
 
+  .block-icon.is-wood {
+    background:
+      repeating-linear-gradient(
+        90deg,
+        oklch(0.52 0.06 62) 0 22%,
+        oklch(0.44 0.05 58) 22% 32%,
+        oklch(0.56 0.06 64) 32% 50%
+      );
+  }
+
+  .block-icon.is-leaves {
+    background:
+      radial-gradient(circle at 30% 25%, oklch(0.72 0.14 142) 0 18%, transparent 19%),
+      radial-gradient(circle at 70% 60%, oklch(0.62 0.14 148) 0 22%, transparent 23%),
+      radial-gradient(circle at 25% 75%, oklch(0.66 0.13 138) 0 18%, transparent 19%),
+      oklch(0.48 0.11 148);
+  }
+
+  .block-icon.is-planks {
+    background:
+      repeating-linear-gradient(
+        0deg,
+        oklch(0.7 0.08 72) 0 40%,
+        oklch(0.6 0.07 68) 40% 46%,
+        oklch(0.74 0.08 74) 46% 50%
+      );
+  }
+
+  .block-icon.is-crafting_table {
+    background:
+      linear-gradient(
+        to bottom,
+        oklch(0.6 0.05 60) 0 34%,
+        oklch(0.72 0.08 74) 34% 100%
+      ),
+      oklch(0.66 0.07 70);
+    box-shadow:
+      inset 0 0 0 1px rgb(0 0 0 / 0.35),
+      inset 0 0 0 4px color-mix(in oklab, oklch(0.4 0.04 58) 55%, transparent);
+  }
+
   .slot-count {
     position: absolute;
     right: 0.18rem;
@@ -362,6 +403,183 @@
     text-shadow: 0 1px 6px color-mix(in oklab, var(--background) 70%, transparent);
   }
 
+  .inventory-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: color-mix(in oklab, var(--background) 62%, transparent);
+    backdrop-filter: blur(5px);
+    pointer-events: auto;
+  }
+
+  .inventory-panel {
+    width: min(34rem, calc(100vw - 2rem));
+    max-height: calc(100dvh - 2rem);
+    overflow: auto;
+    padding: 1rem;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 28%, transparent);
+    border-radius: var(--radius);
+    background: var(--hud);
+    color: var(--hud-foreground);
+    box-shadow: 0 1.25rem 4rem color-mix(in oklab, var(--background) 80%, transparent);
+  }
+
+  .inventory-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .inventory-head h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .inventory-close {
+    min-height: 2.25rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 30%, transparent);
+    border-radius: calc(var(--radius) - 2px);
+    background: color-mix(in oklab, var(--hud-foreground) 10%, transparent);
+    color: inherit;
+    font-size: 0.68rem;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .crafting-row {
+    display: grid;
+    grid-template-columns: auto 2rem 3rem minmax(8rem, 1fr);
+    align-items: center;
+    gap: 0.75rem;
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--hud-foreground) 18%, transparent);
+  }
+
+  .craft-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 3rem);
+    gap: 0.3rem;
+  }
+
+  .craft-grid.is-3x3 {
+    grid-template-columns: repeat(3, 3rem);
+  }
+
+  .craft-arrow {
+    text-align: center;
+    font-size: 1.4rem;
+  }
+
+  .player-preview {
+    justify-self: center;
+    width: 100%;
+    max-width: 9.5rem;
+    height: 8.5rem;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 22%, transparent);
+    border-radius: calc(var(--radius) - 3px);
+    background: color-mix(in oklab, var(--background) 48%, transparent);
+    overflow: hidden;
+  }
+
+  .player-preview canvas {
+    display: block;
+  }
+
+  .inv-grid {
+    display: grid;
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    gap: 0.3rem;
+  }
+
+  .inv-grid.is-hotbar {
+    margin-top: 0.7rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid color-mix(in oklab, var(--hud-foreground) 18%, transparent);
+  }
+
+  .inv-slot {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    aspect-ratio: 1;
+    min-width: 0;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 22%, transparent);
+    border-radius: calc(var(--radius) - 3px);
+    background: color-mix(in oklab, var(--background) 48%, transparent);
+    color: var(--hud-foreground);
+    cursor: pointer;
+  }
+
+  .inv-slot:hover,
+  .inv-slot:focus-visible {
+    border-color: var(--signal);
+    outline: none;
+  }
+
+  .inv-slot.is-result {
+    width: 3rem;
+    background: color-mix(in oklab, var(--signal) 14%, var(--background));
+  }
+
+  .cursor-stack {
+    position: fixed;
+    z-index: 110;
+    width: 2.7rem;
+    height: 2.7rem;
+    display: grid;
+    place-items: center;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  @media (max-width: 640px), (max-height: 540px) {
+    .inventory-panel {
+      width: min(32rem, calc(100vw - 1rem));
+      max-height: calc(100dvh - 1rem);
+      padding: 0.7rem;
+    }
+
+    .inventory-head {
+      margin-bottom: 0.6rem;
+    }
+
+    .crafting-row {
+      grid-template-columns: auto 1.25rem 2.65rem minmax(6rem, 1fr);
+      gap: 0.45rem;
+      padding-bottom: 0.6rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .craft-grid {
+      grid-template-columns: repeat(2, 2.65rem);
+    }
+
+    .craft-grid.is-3x3 {
+      grid-template-columns: repeat(3, 2.65rem);
+    }
+
+    .inv-slot.is-result {
+      width: 2.65rem;
+    }
+
+    .player-preview {
+      max-width: 7rem;
+      height: 6rem;
+    }
+  }
+
   @media (max-width: 640px) {
     .control-panel {
       grid-template-columns: repeat(2, auto);
@@ -370,4 +588,136 @@
       display: none;
     }
   }
+}
+
+@layer components {
+  .touch-controls {
+    position: fixed;
+    inset: auto 0 0 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 0 1rem 5.4rem;
+    pointer-events: none;
+    z-index: 40;
+  }
+
+  .touch-pad {
+    pointer-events: auto;
+    position: relative;
+    width: 7.5rem;
+    height: 7.5rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 22%, transparent);
+    background: var(--hud);
+    backdrop-filter: blur(10px);
+    touch-action: none;
+  }
+
+  .touch-knob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 3rem;
+    height: 3rem;
+    margin: -1.5rem 0 0 -1.5rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--hud-foreground) 28%, transparent);
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 40%, transparent);
+  }
+
+  .touch-buttons {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.6rem;
+  }
+
+  .touch-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 4rem;
+    height: 4rem;
+    padding: 0 0.8rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 22%, transparent);
+    background: var(--hud);
+    color: var(--hud-foreground);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    backdrop-filter: blur(10px);
+    touch-action: none;
+  }
+
+  .touch-btn.is-jump {
+    width: 4.6rem;
+    height: 4.6rem;
+    background: color-mix(in oklab, var(--signal) 32%, var(--hud));
+  }
+
+  .touch-btn .craft-glyph {
+    width: 1.4rem;
+    height: 1.4rem;
+    border: 2px solid currentColor;
+    border-radius: 3px;
+    background:
+      linear-gradient(currentColor, currentColor) center/100% 2px no-repeat,
+      linear-gradient(currentColor, currentColor) center/2px 100% no-repeat;
+  }
+
+  .fp-toggle {
+    position: fixed;
+    top: 0.9rem;
+    right: 0.9rem;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.9rem;
+    height: 2.9rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--hud-foreground) 22%, transparent);
+    background: var(--hud);
+    color: var(--hud-foreground);
+    backdrop-filter: blur(10px);
+  }
+
+  .fp-toggle.is-active {
+    background: color-mix(in oklab, var(--signal) 32%, var(--hud));
+    border-color: color-mix(in oklab, var(--signal) 60%, transparent);
+  }
+
+  .rotate-notice {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    background: color-mix(in oklab, var(--background) 88%, transparent);
+    color: var(--hud-foreground);
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-align: center;
+    padding: 2rem;
+    backdrop-filter: blur(8px);
+  }
+
+  .rotate-glyph {
+    width: 2.2rem;
+    height: 3.4rem;
+    border: 3px solid currentColor;
+    border-radius: 6px;
+    animation: rotate-hint 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes rotate-hint {
+  0%, 20% { transform: rotate(0deg); }
+  60%, 100% { transform: rotate(90deg); }
 }
