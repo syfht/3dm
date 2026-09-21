@@ -6,15 +6,21 @@ import modelAsset from "@/assets/mai_shiranui_kof_xv.glb.asset.json";
 import { createVoxelWorld, type BlockType } from "./voxelWorld";
 import InventoryPanel from "./InventoryPanel";
 import MobileControls from "./MobileControls";
+import { makeHandItem } from "./handItems";
 import {
   BLOCK_LABEL,
   BREAK_TIMES,
   HOTBAR_SIZE,
   INVENTORY_SIZE,
-  STACK_LIMIT,
   craftResult,
+  isPlaceable,
+  maxStack,
+  miningSpeed,
+  type ItemType,
   type Slot,
 } from "./inventory";
+
+const MAX_HEALTH = 20; // 10 hearts
 
 const MODEL_URL = modelAsset.url;
 
@@ -81,6 +87,18 @@ export default function TerrainGame({
   const setNameTagRef = useRef<(name: string) => void>(() => {});
   const [loaded, setLoaded] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [health, setHealth] = useState(MAX_HEALTH);
+  const healthRef = useRef(MAX_HEALTH);
+  const setHealthValue = (value: number) => {
+    const next = THREE.MathUtils.clamp(value, 0, MAX_HEALTH);
+    if (next === healthRef.current) return;
+    healthRef.current = next;
+    setHealth(next);
+  };
+  const damagePlayer = (amount: number) => {
+    if (amount <= 0) return;
+    setHealthValue(healthRef.current - amount);
+  };
   const [attackLabel, setAttackLabel] = useState<string | null>(null);
   const [inventory, setInventory] = useState<Slot[]>(() =>
     Array.from({ length: INVENTORY_SIZE }, () => null),
@@ -100,26 +118,37 @@ export default function TerrainGame({
   const invOpenRef = useRef(false);
   const craftOpenRef = useRef(false);
 
+  // --- chests: 3x9 storage kept per chest block, keyed by its coordinates ----
+  const CHEST_SIZE = 27;
+  const [chestOpen, setChestOpen] = useState(false);
+  const [chestSlots, setChestSlots] = useState<Slot[]>([]);
+  const chestOpenRef = useRef(false);
+  const chestRef = useRef<Slot[]>([]);
+  const chestKeyRef = useRef<string | null>(null);
+  const chestStoreRef = useRef(new Map<string, Slot[]>());
+
   const syncInventory = () => setInventory([...invRef.current]);
   const syncCraft = () => setCraftGrid([...craftRef.current]);
   const syncTable = () => setTableGrid([...tableRef.current]);
-  const anyMenuOpen = () => invOpenRef.current || craftOpenRef.current;
+  const syncChest = () => setChestSlots([...chestRef.current]);
+  const anyMenuOpen = () => invOpenRef.current || craftOpenRef.current || chestOpenRef.current;
 
   // Merge a stack into the inventory, filling partial stacks first.
-  const addStack = (type: BlockType, count: number) => {
+  const addStack = (type: ItemType, count: number) => {
     const list = invRef.current;
+    const limit = maxStack(type);
     let left = count;
     for (let index = 0; index < list.length && left > 0; index += 1) {
       const slot = list[index];
-      if (slot && slot.type === type && slot.count < STACK_LIMIT) {
-        const move = Math.min(left, STACK_LIMIT - slot.count);
+      if (slot && slot.type === type && slot.count < limit) {
+        const move = Math.min(left, limit - slot.count);
         list[index] = { type, count: slot.count + move };
         left -= move;
       }
     }
     for (let index = 0; index < list.length && left > 0; index += 1) {
       if (list[index] === null) {
-        const move = Math.min(left, STACK_LIMIT);
+        const move = Math.min(left, limit);
         list[index] = { type, count: move };
         left -= move;
       }
@@ -127,8 +156,19 @@ export default function TerrainGame({
     syncInventory();
   };
 
-  const handleSlotClick = (area: "inv" | "craft" | "craft3", index: number, right: boolean) => {
-    const list = area === "inv" ? invRef.current : area === "craft" ? craftRef.current : tableRef.current;
+  const handleSlotClick = (
+    area: "inv" | "craft" | "craft3" | "chest",
+    index: number,
+    right: boolean,
+  ) => {
+    const list =
+      area === "inv"
+        ? invRef.current
+        : area === "craft"
+          ? craftRef.current
+          : area === "chest"
+            ? chestRef.current
+            : tableRef.current;
     const slot = list[index] ?? null;
     let held = cursorRef.current;
     if (!held) {
@@ -151,13 +191,14 @@ export default function TerrainGame({
         held = null;
       }
     } else if (slot.type === held.type) {
+      const limit = maxStack(slot.type);
       if (right) {
-        if (slot.count < STACK_LIMIT) {
+        if (slot.count < limit) {
           list[index] = { type: slot.type, count: slot.count + 1 };
           held = held.count > 1 ? { type: held.type, count: held.count - 1 } : null;
         }
       } else {
-        const move = Math.min(held.count, STACK_LIMIT - slot.count);
+        const move = Math.min(held.count, limit - slot.count);
         list[index] = { type: slot.type, count: slot.count + move };
         held = held.count - move > 0 ? { type: held.type, count: held.count - move } : null;
       }
@@ -169,6 +210,7 @@ export default function TerrainGame({
     setCursor(held);
     if (area === "inv") syncInventory();
     else if (area === "craft") syncCraft();
+    else if (area === "chest") syncChest();
     else syncTable();
   };
 
@@ -178,7 +220,8 @@ export default function TerrainGame({
     const result = craftResult(gridRef.current);
     if (!result) return;
     const held = cursorRef.current;
-    if (held && (held.type !== result.type || held.count + result.count > STACK_LIMIT)) return;
+    if (held && (held.type !== result.type || held.count + result.count > maxStack(result.type)))
+      return;
     // Consume one item from every filled crafting cell.
     gridRef.current = gridRef.current.map((slot) =>
       slot ? (slot.count > 1 ? { type: slot.type, count: slot.count - 1 } : null) : null,
@@ -232,6 +275,41 @@ export default function TerrainGame({
     if (document.pointerLockElement) document.exitPointerLock();
   };
 
+  // Chest contents stay in the world; only the cursor stack comes back.
+  const closeChest = () => {
+    const held = cursorRef.current;
+    if (held) addStack(held.type, held.count);
+    cursorRef.current = null;
+    setCursor(null);
+    chestOpenRef.current = false;
+    chestKeyRef.current = null;
+    setChestOpen(false);
+  };
+
+  const openChestAt = (blockKey: string) => {
+    if (anyMenuOpen()) return;
+    let slots = chestStoreRef.current.get(blockKey);
+    if (!slots) {
+      slots = Array.from({ length: CHEST_SIZE }, () => null);
+      chestStoreRef.current.set(blockKey, slots);
+    }
+    chestRef.current = slots;
+    chestKeyRef.current = blockKey;
+    setChestSlots([...slots]);
+    chestOpenRef.current = true;
+    setChestOpen(true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  };
+
+  // Aimed block, updated by the render loop: drives E / the mobile button.
+  const aimInfoRef = useRef<{ key: string; type: BlockType } | null>(null);
+  const interact = () => {
+    if (anyMenuOpen()) return;
+    const aim = aimInfoRef.current;
+    if (aim?.type === "chest") openChestAt(aim.key);
+    else openCrafting();
+  };
+
   // Touch control bridge: the render loop reads these each frame.
   const touchMoveRef = useRef({ x: 0, y: 0 });
   const touchJumpRef = useRef(false);
@@ -239,6 +317,10 @@ export default function TerrainGame({
   const [isTouch, setIsTouch] = useState(false);
   const [portrait, setPortrait] = useState(false);
   const [firstPerson, setFirstPerson] = useState(false);
+  // True when the crosshair is on a crafting table or chest (mobile shows its
+  // interact button then).
+  const [aimTable, setAimTable] = useState(false);
+  const aimTableRef = useRef(false);
   const toggleViewRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -422,6 +504,7 @@ export default function TerrainGame({
     let grounded = true;
     let visualStepOffset = 0;
     let landingImpact = 0;
+    let regenTimer = 0;
     let airborneBlend = 0;
     let cameraYaw = 0;
     let cameraPitch = 0.12;
@@ -461,8 +544,8 @@ export default function TerrainGame({
     // Held item: one block mesh per type, parented to the right hand.
     let handAttach: THREE.Object3D | null = null;
     let handScale = 1;
-    const heldMeshes = new Map<BlockType, THREE.Mesh>();
-    let heldType: BlockType | null = null;
+    const heldMeshes = new Map<ItemType, THREE.Object3D>();
+    let heldType: ItemType | null = null;
 
     let previousSpeed = 0;
     let previousVerticalVelocity = 0;
@@ -705,7 +788,14 @@ export default function TerrainGame({
           miningHeld = false;
           if (document.pointerLockElement) document.exitPointerLock();
         };
-        if (invOpenRef.current) {
+        if (chestOpenRef.current) {
+          closeChest();
+          if (isT) {
+            openMenu();
+            invOpenRef.current = true;
+            setInvOpen(true);
+          }
+        } else if (invOpenRef.current) {
           closeInventory();
           if (isE) {
             openMenu();
@@ -725,8 +815,8 @@ export default function TerrainGame({
             invOpenRef.current = true;
             setInvOpen(true);
           } else {
-            craftOpenRef.current = true;
-            setCraftOpen(true);
+            // E opens the chest you are looking at, otherwise the crafting table.
+            interact();
           }
         }
         return;
@@ -757,7 +847,7 @@ export default function TerrainGame({
     const touchLook = { id: -1, x: 0, y: 0, moved: 0 };
     const placeSelected = () => {
       const stack = invRef.current[selectedRef.current];
-      if (!stack) return false;
+      if (!stack || !isPlaceable(stack.type)) return false;
       const placed = world.placeBlock(
         lastAimOrigin,
         lastAimDirection,
@@ -918,6 +1008,9 @@ export default function TerrainGame({
         } else {
           if (!grounded && verticalVelocity < -2.2) {
             landingImpact = THREE.MathUtils.clamp(-verticalVelocity - 2.2, 0, 8);
+            // Fall damage: half a heart per block above a ~3 block drop.
+            const fallSpeed = -verticalVelocity;
+            if (fallSpeed > 9.5) damagePlayer(Math.round((fallSpeed - 9.5) * 1.1));
           }
           character.position.y = groundY;
         }
@@ -927,6 +1020,22 @@ export default function TerrainGame({
         grounded = false;
       }
       world.update(delta, character.position, addToInventory);
+
+      // Health: slow regeneration, and a respawn when it runs out.
+      if (healthRef.current <= 0) {
+        character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
+        verticalVelocity = 0;
+        setHealthValue(MAX_HEALTH);
+        regenTimer = 0;
+      } else if (healthRef.current < MAX_HEALTH) {
+        regenTimer += delta;
+        if (regenTimer >= 4) {
+          regenTimer = 0;
+          setHealthValue(healthRef.current + 1);
+        }
+      } else {
+        regenTimer = 0;
+      }
 
 
       locomotionBlend = THREE.MathUtils.lerp(locomotionBlend, speed > 0 ? 1 : 0, 1 - Math.exp(-delta * (speed > 0 ? 9 : 7)));
@@ -1177,6 +1286,14 @@ export default function TerrainGame({
       lastAimDirection.copy(aimDirection);
       const aimed = world.pickBlock(aimOrigin, aimDirection, firstPersonView ? 5.5 : 3.2);
       world.highlightBlock(aimed);
+      const aimedType = aimed ? world.blockTypeAt(aimed) : null;
+      aimInfoRef.current =
+        aimed && aimedType ? { key: `${aimed[0]},${aimed[1]},${aimed[2]}`, type: aimedType } : null;
+      const aimedUsable = aimedType === "crafting_table" || aimedType === "chest";
+      if (aimedUsable !== aimTableRef.current) {
+        aimTableRef.current = aimedUsable;
+        setAimTable(aimedUsable);
+      }
       const sameBlock =
         aimed && miningBlock
           ? aimed[0] === miningBlock[0] && aimed[1] === miningBlock[1] && aimed[2] === miningBlock[2]
@@ -1200,10 +1317,24 @@ export default function TerrainGame({
       }
       if (miningBlock && (miningHeld || attackBonus > 0)) {
         const miningType = world.blockTypeAt(miningBlock);
-        if (miningHeld) miningProgress += delta / (miningType ? BREAK_TIMES[miningType] : 0.95);
+        if (miningHeld) {
+          const tool = invRef.current[selectedRef.current]?.type ?? null;
+          const speed = miningType ? miningSpeed(tool, miningType) : 1;
+          miningProgress += (delta * speed) / (miningType ? BREAK_TIMES[miningType] : 0.95);
+        }
         miningProgress += attackBonus;
         attackBonus = 0;
         if (miningProgress >= 1) {
+          // A broken chest spills everything it was holding.
+          if (miningType === "chest") {
+            const chestKey = `${miningBlock[0]},${miningBlock[1]},${miningBlock[2]}`;
+            const stored = chestStoreRef.current.get(chestKey);
+            if (stored) {
+              for (const slot of stored) if (slot) addStack(slot.type, slot.count);
+              chestStoreRef.current.delete(chestKey);
+            }
+            if (chestKeyRef.current === chestKey) closeChest();
+          }
           world.removeBlock(miningBlock);
           miningBlock = null;
           miningProgress = 0;
@@ -1215,7 +1346,8 @@ export default function TerrainGame({
       }
       world.showBreakProgress(miningBlock, miningProgress);
       // Show the selected stack's block in the character's hand.
-      const nextHeldType = invRef.current[selectedRef.current]?.type ?? null;
+      const selectedType = invRef.current[selectedRef.current]?.type ?? null;
+      const nextHeldType = selectedType ?? null;
       if (nextHeldType !== heldType) {
         const previous = heldType ? heldMeshes.get(heldType) : null;
         if (previous) previous.visible = false;
@@ -1223,12 +1355,16 @@ export default function TerrainGame({
         if (nextHeldType && handAttach) {
           let mesh = heldMeshes.get(nextHeldType);
           if (!mesh) {
-            mesh = world.makeBlockMesh(0.19, nextHeldType);
-            mesh.scale.setScalar(1 / handScale);
-            heldMeshes.set(nextHeldType, mesh);
-            handAttach.add(mesh);
+            mesh = isPlaceable(nextHeldType)
+              ? world.makeBlockMesh(0.19, nextHeldType)
+              : (makeHandItem(nextHeldType) ?? undefined);
+            if (mesh) {
+              mesh.scale.setScalar(1 / handScale);
+              heldMeshes.set(nextHeldType, mesh);
+              handAttach.add(mesh);
+            }
           }
-          mesh.visible = true;
+          if (mesh) mesh.visible = true;
         }
       }
 
@@ -1349,7 +1485,29 @@ export default function TerrainGame({
         />
       ) : null}
 
+      {chestOpen ? (
+        <InventoryPanel
+          title="Chest"
+          inventory={inventory}
+          craftGrid={craftGrid}
+          chestSlots={chestSlots}
+          cursor={cursor}
+          cursorPos={cursorPos}
+          onSlotClick={handleSlotClick}
+          onTakeResult={() => {}}
+          onClose={closeChest}
+          onCursorMove={(x, y) => setCursorPos({ x, y })}
+        />
+      ) : null}
+
       <div className="hotbar-wrap">
+        <div className="hp-bar" role="img" aria-label={`Health ${health} of ${MAX_HEALTH}`}>
+          {Array.from({ length: 10 }, (_, index) => {
+            const filled = health - index * 2;
+            const state = filled >= 2 ? "is-full" : filled === 1 ? "is-half" : "is-empty";
+            return <span key={index} className={`heart ${state}`} aria-hidden="true" />;
+          })}
+        </div>
         <div className="hotbar" role="list" aria-label="Inventory hotbar">
           {inventory.slice(0, HOTBAR_SIZE).map((slot, index) => (
             <button
@@ -1395,7 +1553,7 @@ export default function TerrainGame({
         </button>
       ) : null}
 
-      {isTouch && !invOpen && !craftOpen ? (
+      {isTouch && !invOpen && !craftOpen && !chestOpen ? (
         <MobileControls
           onMove={(x, y) => {
             touchMoveRef.current = { x, y };
@@ -1406,8 +1564,9 @@ export default function TerrainGame({
           onPlace={() => {
             touchPlaceRef.current = true;
           }}
-          onOpenCrafting={openCrafting}
+          onOpenCrafting={interact}
           onOpenInventory={openInventory}
+          showCrafting={aimTable}
         />
       ) : null}
 
