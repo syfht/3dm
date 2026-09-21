@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import modelAsset from "@/assets/mai_shiranui_kof_xv.glb.asset.json";
+import { MODEL_URL, createModelLoader } from "@/assets/model";
 
 // Small slowly-rotating render of the player character for menu panels.
 export default function PlayerPreview() {
@@ -31,7 +30,7 @@ export default function PlayerPreview() {
 
     let model: THREE.Object3D | undefined;
     let disposed = false;
-    new GLTFLoader().load(modelAsset.url, (gltf) => {
+    createModelLoader().load(MODEL_URL, (gltf) => {
       if (disposed) return;
       host.dataset["loaded"] = "true";
       model = gltf.scene;
