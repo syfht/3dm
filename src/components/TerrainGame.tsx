@@ -57,8 +57,28 @@ function findBone(root: THREE.Object3D, partial: string) {
 }
 
 
-export default function TerrainGame() {
+// Day / night: 5 minutes of daylight, 5 minutes of night.
+const CYCLE_SECONDS = 600;
+
+export default function TerrainGame({
+  username = "Player",
+  disabled = false,
+  onProgress,
+  onReady,
+}: {
+  username?: string;
+  disabled?: boolean;
+  onProgress?: (percent: number) => void;
+  onReady?: () => void;
+}) {
+  const onProgressRef = useRef(onProgress);
+  const onReadyRef = useRef(onReady);
+  onProgressRef.current = onProgress;
+  onReadyRef.current = onReady;
   const hostRef = useRef<HTMLDivElement>(null);
+  const usernameRef = useRef(username);
+  const disabledRef = useRef(false);
+  const setNameTagRef = useRef<(name: string) => void>(() => {});
   const [loaded, setLoaded] = useState(false);
   const [moving, setMoving] = useState(false);
   const [attackLabel, setAttackLabel] = useState<string | null>(null);
@@ -205,6 +225,13 @@ export default function TerrainGame() {
     if (document.pointerLockElement) document.exitPointerLock();
   };
 
+  const openInventory = () => {
+    if (anyMenuOpen()) return;
+    invOpenRef.current = true;
+    setInvOpen(true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  };
+
   // Touch control bridge: the render loop reads these each frame.
   const touchMoveRef = useRef({ x: 0, y: 0 });
   const touchJumpRef = useRef(false);
@@ -238,6 +265,15 @@ export default function TerrainGame() {
 
 
   useEffect(() => {
+    usernameRef.current = (username || "Player").trim() || "Player";
+    setNameTagRef.current(usernameRef.current);
+  }, [username]);
+
+  useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
@@ -261,16 +297,64 @@ export default function TerrainGame() {
     renderer.toneMappingExposure = 1.05;
     host.appendChild(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0xd8eff2, 0x526344, 2.2));
+    const hemi = new THREE.HemisphereLight(0xd8eff2, 0x526344, 2.2);
+    scene.add(hemi);
     const sun = new THREE.DirectionalLight(0xfff2d2, 4.2);
     sun.position.set(-18, 26, 12);
-    sun.castShadow = true;
+    sun.castShadow = !lowFx;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.camera.left = -18;
     sun.shadow.camera.right = 18;
     sun.shadow.camera.top = 18;
     sun.shadow.camera.bottom = -18;
     scene.add(sun);
+    scene.add(sun.target);
+
+    // --- sky: sun, moon, stars, and the colour of the day --------------------
+    const moon = new THREE.DirectionalLight(0xbcd2ff, 0);
+    scene.add(moon);
+    scene.add(moon.target);
+
+    const skyGroup = new THREE.Group();
+    scene.add(skyGroup);
+    const sunMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(8, 20, 20),
+      new THREE.MeshBasicMaterial({ color: 0xffeaa8, fog: false }),
+    );
+    const moonMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(5.5, 20, 20),
+      new THREE.MeshBasicMaterial({ color: 0xe6ecff, fog: false }),
+    );
+    skyGroup.add(sunMesh, moonMesh);
+
+    const starCount = 500;
+    const starPositions = new Float32Array(starCount * 3);
+    for (let index = 0; index < starCount; index += 1) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 0.9 + 0.05);
+      starPositions[index * 3] = Math.sin(phi) * Math.cos(theta) * 210;
+      starPositions[index * 3 + 1] = Math.cos(phi) * 210;
+      starPositions[index * 3 + 2] = Math.sin(phi) * Math.sin(theta) * 210;
+    }
+    const starGeometry = new THREE.BufferGeometry();
+    starGeometry.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+    const starMaterial = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 1.6,
+      transparent: true,
+      opacity: 0,
+      fog: false,
+      depthWrite: false,
+    });
+    const stars = new THREE.Points(starGeometry, starMaterial);
+    skyGroup.add(stars);
+
+    const skyDay = new THREE.Color(0xa8c5ce);
+    const skyNight = new THREE.Color(0x0a1026);
+    const skyDusk = new THREE.Color(0xe0a06a);
+    const skyColor = new THREE.Color().copy(skyDay);
+    scene.background = skyColor;
+    (scene.fog as THREE.FogExp2).color = skyColor;
     const world = createVoxelWorld(scene);
 
     // --- inventory -----------------------------------------------------------
@@ -290,6 +374,46 @@ export default function TerrainGame() {
     const character = new THREE.Group();
     character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
     scene.add(character);
+
+    // Floating name tag above the player.
+    const buildNameTexture = (text: string) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 512;
+      canvas.height = 128;
+      const ctx = canvas.getContext("2d")!;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "rgba(10, 14, 20, 0.55)";
+      ctx.beginPath();
+      ctx.roundRect(8, 26, canvas.width - 16, 76, 22);
+      ctx.fill();
+      ctx.font = "bold 54px system-ui, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text.slice(0, 16), canvas.width / 2, canvas.height / 2);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return texture;
+    };
+    const nameSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: buildNameTexture(usernameRef.current?.trim() || "Player"),
+        transparent: true,
+        depthTest: false,
+      }),
+    );
+    nameSprite.scale.set(1.5, 0.375, 1);
+    nameSprite.position.set(0, 1.92, 0);
+    nameSprite.renderOrder = 10;
+    character.add(nameSprite);
+    setNameTagRef.current = (name: string) => {
+      const next = name.trim() || "Player";
+      usernameRef.current = next;
+      const old = nameSprite.material.map;
+      nameSprite.material.map = buildNameTexture(next);
+      nameSprite.material.needsUpdate = true;
+      if (old) old.dispose();
+    };
 
     let model: THREE.Object3D | undefined;
     let modelBaseY = 0;
@@ -316,6 +440,10 @@ export default function TerrainGame() {
     const ATTACK_DURATIONS: Record<AttackMode, number> = { punch: 0.72, combo: 1.3, kick: 0.9 };
     let attackTime = 0;
     let attackMode: AttackMode | null = null;
+    // True when a punch is chained from a previous punch (held mining): the
+    // swing then returns strike -> windup -> strike instead of snapping from
+    // the extended strike back to the windup.
+    let chainedPunch = false;
     let pendingHits = 0;
     // Progressive (Minecraft-style) block breaking.
     let miningHeld = false;
@@ -552,9 +680,19 @@ export default function TerrainGame() {
 
       character.add(loadedModel);
       setLoaded(true);
+      onProgressRef.current?.(100);
+      onReadyRef.current?.();
+    }, (event) => {
+      const total = event.total && event.total > 0 ? event.total : 14_000_000;
+      const percent = Math.min(99, Math.round((event.loaded / total) * 100));
+      onProgressRef.current?.(percent);
+    }, () => {
+      onProgressRef.current?.(100);
+      onReadyRef.current?.();
     });
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (disabledRef.current) return;
       // T toggles the inventory (2x2), E the crafting table (3x3); while any
       // menu is open the world ignores input.
       const isT = event.code === "KeyT";
@@ -612,6 +750,7 @@ export default function TerrainGame() {
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
+      if (disabledRef.current) return;
       keys[event.code] = false;
     };
     // Touch look: dragging the screen turns the camera, a still hold mines.
@@ -630,7 +769,7 @@ export default function TerrainGame() {
       return placed;
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (anyMenuOpen()) return;
+      if (disabledRef.current || anyMenuOpen()) return;
       const touch = event.pointerType !== "mouse";
       if (touch) {
         touchLook.id = event.pointerId;
@@ -651,6 +790,7 @@ export default function TerrainGame() {
       } else {
         return;
       }
+      chainedPunch = false;
       attackTime = ATTACK_DURATIONS[attackMode];
       pendingHits = attackMode === "combo" ? 2 : 1;
       setAttackLabel(attackMode === "punch" ? "PUNCH" : attackMode === "combo" ? "COMBO" : "KICK");
@@ -819,12 +959,23 @@ export default function TerrainGame() {
         attackTime = Math.max(0, attackTime - delta);
         const p = 1 - attackTime / ATTACK_DURATIONS[attackMode];
         if (attackMode === "punch") {
-          if (p < 0.26) { segmentT = p / 0.26; attackBlend = segmentT; }
-          else if (p < 0.5) { segmentT = 1 + (p - 0.26) / 0.24; attackBlend = 1; }
-          else if (p < 0.68) { segmentT = 2; attackBlend = 1; }
-          else { segmentT = 2; attackBlend = (1 - p) / 0.32; }
           poseA = windupPose; poseB = strikePose;
-          twist = (Math.min(segmentT, 2) - 1) * 0.3 * attackBlend;
+          if (chainedPunch) {
+            // Chained mining swing: start from the extended strike, draw back
+            // to the windup, then punch out again — no snap back to idle.
+            if (p < 0.34) { segmentT = 2 + p / 0.34; attackBlend = 1; }
+            else if (p < 0.66) { segmentT = 3 - (p - 0.34) / 0.32; attackBlend = 1; }
+            else if (p < 0.78) { segmentT = 2; attackBlend = 1; }
+            else { segmentT = 2; attackBlend = (1 - p) / 0.22; }
+            const k = segmentT <= 2 ? segmentT : 4 - segmentT;
+            twist = (k - 1) * 0.3 * attackBlend;
+          } else {
+            if (p < 0.26) { segmentT = p / 0.26; attackBlend = segmentT; }
+            else if (p < 0.5) { segmentT = 1 + (p - 0.26) / 0.24; attackBlend = 1; }
+            else if (p < 0.68) { segmentT = 2; attackBlend = 1; }
+            else { segmentT = 2; attackBlend = (1 - p) / 0.32; }
+            twist = (Math.min(segmentT, 2) - 1) * 0.3 * attackBlend;
+          }
         } else if (attackMode === "combo") {
           // Two-stage: jab (p 0..0.45) then cross (p 0.45..1).
           if (p < 0.12) { segmentT = p / 0.12; attackBlend = segmentT; poseA = jabWindupPose; poseB = jabStrikePose; twist = -segmentT * 0.28 * attackBlend; }
@@ -844,7 +995,7 @@ export default function TerrainGame() {
           twist = -0.18 * (k <= 1 ? k : 2 - k) * attackBlend;
         }
         // Landing frames chip away at the targeted block instead of breaking it.
-        const hitPoint = attackMode === "combo" ? (pendingHits === 2 ? 0.3 : 0.74) : attackMode === "kick" ? 0.48 : 0.5;
+        const hitPoint = attackMode === "combo" ? (pendingHits === 2 ? 0.3 : 0.74) : attackMode === "kick" ? 0.48 : chainedPunch ? 0.66 : 0.5;
         if (pendingHits > 0 && p >= hitPoint) {
           pendingHits -= 1;
           attackBonus += 0.3;
@@ -852,6 +1003,7 @@ export default function TerrainGame() {
 
         if (attackTime === 0) {
           attackMode = null;
+          chainedPunch = false;
           setAttackLabel(null);
         }
       }
@@ -878,7 +1030,8 @@ export default function TerrainGame() {
           const rest = restRotations.get(bone);
           if (!strike || !rest) return;
           if (segmentT <= 1) target.copy(rest).slerp(windup, segmentT);
-          else target.copy(windup).slerp(strike, segmentT - 1);
+          else if (segmentT <= 2) target.copy(windup).slerp(strike, segmentT - 1);
+          else target.copy(strike).slerp(windup, segmentT - 2);
           bone.quaternion.slerp(target, attackBlend);
         });
       }
@@ -1034,9 +1187,12 @@ export default function TerrainGame() {
       }
       // Keep swinging while the mouse stays held on a block. Chain the next
       // punch as soon as the strike lands (skip the recovery pause) so the
-      // animation loops without dropping back to idle between swings.
+      // animation loops without dropping back to idle between swings. Chained
+      // swings use the reversed timeline so the arm travels strike -> windup
+      // -> strike instead of snapping.
       const punchRecovery = ATTACK_DURATIONS.punch * 0.32;
       if (miningHeld && miningBlock && (attackTime === 0 || (attackMode === "punch" && attackTime <= punchRecovery))) {
+        chainedPunch = attackMode === "punch" && attackTime > 0;
         attackMode = "punch";
         attackTime = ATTACK_DURATIONS.punch;
         pendingHits = 1;
@@ -1076,8 +1232,34 @@ export default function TerrainGame() {
         }
       }
 
-      sun.position.x = character.position.x - 18;
-      sun.position.z = character.position.z + 12;
+      // --- day / night cycle -------------------------------------------------
+      const cycleT = (clock.elapsedTime % CYCLE_SECONDS) / CYCLE_SECONDS;
+      const cycleAngle = cycleT * Math.PI * 2;
+      const sunDir = new THREE.Vector3(Math.cos(cycleAngle), Math.sin(cycleAngle), 0.35).normalize();
+      const elevation = sunDir.y;
+      const dayFactor = THREE.MathUtils.clamp((elevation + 0.05) / 0.35, 0, 1);
+      const nightFactor = 1 - dayFactor;
+
+      skyGroup.position.copy(camera.position);
+      sunMesh.position.copy(sunDir).multiplyScalar(220);
+      moonMesh.position.copy(sunDir).multiplyScalar(-220);
+      sunMesh.visible = elevation > -0.2;
+      moonMesh.visible = elevation < 0.2;
+      starMaterial.opacity = nightFactor * 0.9;
+
+      sun.position.copy(character.position).addScaledVector(sunDir, 40);
+      sun.target.position.copy(character.position);
+      sun.intensity = 4.2 * dayFactor;
+      sun.visible = dayFactor > 0.01;
+      moon.position.copy(character.position).addScaledVector(sunDir, -40);
+      moon.target.position.copy(character.position);
+      moon.intensity = 0.9 * nightFactor;
+      hemi.intensity = 0.35 + 1.9 * dayFactor;
+
+      const horizonGlow = THREE.MathUtils.clamp(1 - Math.abs(elevation) / 0.25, 0, 1);
+      skyColor.copy(skyNight).lerp(skyDay, dayFactor).lerp(skyDusk, horizonGlow * 0.45);
+
+      nameSprite.visible = !firstPersonView;
 
       const nowMoving = speed > 0;
       if (nowMoving !== lastMovingState) {
@@ -1225,6 +1407,7 @@ export default function TerrainGame() {
             touchPlaceRef.current = true;
           }}
           onOpenCrafting={openCrafting}
+          onOpenInventory={openInventory}
         />
       ) : null}
 
