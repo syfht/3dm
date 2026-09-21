@@ -5,39 +5,14 @@ import * as THREE from "three";
 // random heights from layered value noise; blocks fully surrounded by
 // neighbours are culled. Attacks raycast the meshes and remove the hit block.
 
-const WORLD_RADIUS = 40; // blocks from centre on X/Z
-const MAX_HEIGHT = 10;
-const SCAN_HEIGHT = MAX_HEIGHT + 26; // terrain + tallest tree
-
-function hash2(x: number, z: number) {
-  const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
-  return n - Math.floor(n);
-}
-
-function smoothNoise(x: number, z: number) {
-  const xi = Math.floor(x);
-  const zi = Math.floor(z);
-  const xf = x - xi;
-  const zf = z - zi;
-  const ux = xf * xf * (3 - 2 * xf);
-  const uz = zf * zf * (3 - 2 * zf);
-  const a = hash2(xi, zi);
-  const b = hash2(xi + 1, zi);
-  const c = hash2(xi, zi + 1);
-  const d = hash2(xi + 1, zi + 1);
-  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(a, b, ux), THREE.MathUtils.lerp(c, d, ux), uz);
-}
-
-function columnHeight(x: number, z: number, seed = 0) {
-  const ox = seed * 123.456;
-  const oz = seed * 789.012;
-  const base = smoothNoise((x + ox) * 0.055, (z + oz) * 0.055) * 1.0;
-  const mid = smoothNoise((x + ox) * 0.13, (z + oz) * 0.13) * 0.45;
-  const fine = smoothNoise((x + ox) * 0.31, (z + oz) * 0.31) * 0.2;
-  const ridge = Math.hypot(x, z) > 44 ? (Math.hypot(x, z) - 44) * 0.16 : 0;
-  const h = 3 + (base + mid + fine) * 4.2 + ridge;
-  return THREE.MathUtils.clamp(Math.round(h), 1, MAX_HEIGHT + 6);
-}
+import {
+  WORLD_RADIUS,
+  hash2,
+  SCAN_HEIGHT,
+  blockKey,
+  generateTerrain,
+  groundHeightIn,
+} from "@/lib/terrain";
 
 type TextureKind =
   | "grass_top"
@@ -289,54 +264,11 @@ function crackTexture(stage: number) {
 }
 
 export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {}): VoxelWorld {
-  const solid = new Map<string, BlockType>();
-  const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  const key = blockKey;
   // Every player in the same online world generates from the same seed, so
-  // the terrain is identical for everyone.
+  // the terrain is identical for everyone (the server shares this generator).
   const seed = options.seed ?? 0;
-  const seedNoise = (x: number, z: number) => hash2(x + seed * 31.7, z - seed * 17.3);
-
-  for (let x = -WORLD_RADIUS; x <= WORLD_RADIUS; x += 1) {
-    for (let z = -WORLD_RADIUS; z <= WORLD_RADIUS; z += 1) {
-      const top = columnHeight(x, z, seed);
-      // Grass/dirt skin is 4-5 blocks deep; everything under it is stone.
-      const soil = seedNoise(x * 4.4 + 2.1, z * 6.8 + 9.7) > 0.5 ? 5 : 4;
-      for (let y = 0; y < top; y += 1) {
-        solid.set(key(x, y, z), y >= top - soil ? "grass" : "stone");
-      }
-    }
-  }
-
-  // --- trees ---------------------------------------------------------------
-  const trees: Array<[number, number]> = [];
-  for (let x = -WORLD_RADIUS + 3; x <= WORLD_RADIUS - 3; x += 1) {
-    for (let z = -WORLD_RADIUS + 3; z <= WORLD_RADIUS - 3; z += 1) {
-      if (seedNoise(x * 1.7 + 11.3, z * 2.3 + 7.1) < 0.978) continue;
-      if (Math.hypot(x, z) < 5) continue; // keep the spawn area clear
-      if (trees.some(([tx, tz]) => Math.abs(tx - x) < 5 && Math.abs(tz - z) < 5)) continue;
-      trees.push([x, z]);
-      const base = columnHeight(x, z, seed);
-      const trunk = 4 + Math.floor(seedNoise(x * 3.1, z * 5.7) * 3);
-      for (let y = base; y < base + trunk; y += 1) solid.set(key(x, y, z), "wood");
-      const crown = base + trunk;
-      // leaf canopy: two wide layers, then a tapered cap
-      for (let dy = -2; dy <= 1; dy += 1) {
-        const radius = dy <= -1 ? 2 : dy === 0 ? 2 : 1;
-        for (let dx = -radius; dx <= radius; dx += 1) {
-          for (let dz = -radius; dz <= radius; dz += 1) {
-            if (Math.abs(dx) === radius && Math.abs(dz) === radius && radius > 1) continue;
-            const ly = crown + dy;
-            const lx = x + dx;
-            const lz = z + dz;
-            if (solid.get(key(lx, ly, lz)) === "wood") continue;
-            if (solid.has(key(lx, ly, lz))) continue;
-            solid.set(key(lx, ly, lz), "leaves");
-          }
-        }
-      }
-      solid.set(key(x, crown + 2, z), "leaves");
-    }
-  }
+  const solid = generateTerrain(seed) as Map<string, BlockType>;
 
   // Replay every block other players already mined or placed in this world.
   for (const edit of options.edits ?? []) {
@@ -451,14 +383,8 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   // Highest solid top at or below fromY (defaults to a full top-down scan).
   // Passing the feet height keeps overhead blocks (tree canopies) from
   // counting as ground.
-  const groundHeight = (x: number, z: number, fromY = SCAN_HEIGHT) => {
-    const bx = Math.floor(x);
-    const bz = Math.floor(z);
-    for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
-      if (isSolid(bx, y, bz)) return y + 1;
-    }
-    return 0;
-  };
+  const groundHeight = (x: number, z: number, fromY = SCAN_HEIGHT) =>
+    groundHeightIn(solid, x, z, fromY);
 
   const blockTypeAt = (block: BlockCoord) => solid.get(key(block[0], block[1], block[2])) ?? null;
 
