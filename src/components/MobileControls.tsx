@@ -4,12 +4,12 @@ type Props = {
   onMove: (x: number, y: number) => void;
   onJump: () => void;
   onPlace: () => void;
-  onOpenInventory: () => void;
+  onOpenCrafting: () => void;
 };
 
 const RADIUS = 46;
 
-export default function MobileControls({ onMove, onJump, onPlace, onOpenInventory }: Props) {
+export default function MobileControls({ onMove, onJump, onPlace, onOpenCrafting }: Props) {
   const padRef = useRef<HTMLDivElement>(null);
   const activeId = useRef<number | null>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
@@ -61,10 +61,10 @@ export default function MobileControls({ onMove, onJump, onPlace, onOpenInventor
         <button
           type="button"
           className="touch-btn is-craft"
-          aria-label="Open inventory and crafting"
+          aria-label="Open crafting table"
           onPointerDown={(event) => {
             event.preventDefault();
-            onOpenInventory();
+            onOpenCrafting();
           }}
         >
           <span className="craft-glyph" aria-hidden="true" />
