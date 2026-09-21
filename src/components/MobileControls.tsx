@@ -5,11 +5,18 @@ type Props = {
   onJump: () => void;
   onPlace: () => void;
   onOpenCrafting: () => void;
+  onOpenInventory: () => void;
 };
 
 const RADIUS = 46;
 
-export default function MobileControls({ onMove, onJump, onPlace, onOpenCrafting }: Props) {
+export default function MobileControls({
+  onMove,
+  onJump,
+  onPlace,
+  onOpenCrafting,
+  onOpenInventory,
+}: Props) {
   const padRef = useRef<HTMLDivElement>(null);
   const activeId = useRef<number | null>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
@@ -58,6 +65,17 @@ export default function MobileControls({ onMove, onJump, onPlace, onOpenCrafting
       </div>
 
       <div className="touch-buttons">
+        <button
+          type="button"
+          className="touch-btn"
+          aria-label="Open inventory"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            onOpenInventory();
+          }}
+        >
+          BAG
+        </button>
         <button
           type="button"
           className="touch-btn is-craft"
