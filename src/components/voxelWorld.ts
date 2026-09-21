@@ -148,7 +148,7 @@ export type BlockType = "grass" | "wood" | "leaves" | "planks" | "crafting_table
 export const BLOCK_TYPES: BlockType[] = ["grass", "wood", "leaves", "planks", "crafting_table"];
 
 export type VoxelWorld = {
-  groundHeight: (x: number, z: number) => number;
+  groundHeight: (x: number, z: number, fromY?: number) => number;
   breakBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => boolean;
   pickBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => BlockCoord | null;
   blockTypeAt: (block: BlockCoord) => BlockType | null;
@@ -338,10 +338,13 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     return block;
   };
 
-  const groundHeight = (x: number, z: number) => {
+  // Highest solid top at or below fromY (defaults to a full top-down scan).
+  // Passing the feet height keeps overhead blocks (tree canopies) from
+  // counting as ground.
+  const groundHeight = (x: number, z: number, fromY = SCAN_HEIGHT) => {
     const bx = Math.floor(x);
     const bz = Math.floor(z);
-    for (let y = SCAN_HEIGHT; y >= 0; y -= 1) {
+    for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
       if (isSolid(bx, y, bz)) return y + 1;
     }
     return 0;
@@ -353,6 +356,18 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const dropGeometry = new THREE.BoxGeometry(0.32, 0.32, 0.32);
   type Drop = { mesh: THREE.Mesh; velocity: THREE.Vector3; bob: number; type: BlockType };
   const drops: Drop[] = [];
+
+  // Dropped items fall through foliage so they land on reachable ground
+  // instead of resting on top of a canopy.
+  const dropFloor = (x: number, z: number, fromY: number) => {
+    const bx = Math.floor(x);
+    const bz = Math.floor(z);
+    for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
+      const type = solid.get(key(bx, y, bz));
+      if (type && type !== "leaves") return y + 1;
+    }
+    return 0;
+  };
 
   const spawnDrop = (block: BlockCoord, type: BlockType) => {
     const piece = new THREE.Mesh(dropGeometry, materialsByType[type]);
@@ -508,13 +523,13 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
         const dy = playerPosition.y + 0.8 - p.y;
         const dz = playerPosition.z - p.z;
         const distance = Math.hypot(dx, dy, dz);
-        if (distance < 0.55) {
+        if (distance < 1.3) {
           scene.remove(drop.mesh);
           drops.splice(index, 1);
           onCollect?.(drop.type);
           continue;
         }
-        if (distance < 1.9) {
+        if (distance < 4.2) {
           // Vacuum the drop toward the player, Minecraft style.
           p.x += (dx / distance) * delta * 6;
           p.y += (dy / distance) * delta * 6;
@@ -529,7 +544,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
       p.addScaledVector(drop.velocity, delta);
       drop.velocity.x *= Math.exp(-3 * delta);
       drop.velocity.z *= Math.exp(-3 * delta);
-      const rest = groundHeight(p.x, p.z) + 0.17 + Math.sin(drop.bob) * 0.05;
+      const rest = dropFloor(p.x, p.z, p.y) + 0.17 + Math.sin(drop.bob) * 0.05;
       if (p.y <= rest) {
         p.y = rest;
         drop.velocity.set(0, 0, 0);
