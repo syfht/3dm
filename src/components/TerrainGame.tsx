@@ -8,7 +8,7 @@ import MobileControls from "./MobileControls";
 import { makeHandItem } from "./handItems";
 import { createRemotePlayers } from "./remotePlayers";
 import { startBackgroundTicker } from "@/lib/backgroundTicker";
-import { connectWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
+import { CLIENT_ID, connectWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
 import { HIT_RANGE, HURT_FLASH_MS } from "@/lib/protocol";
 import {
   BLOCK_LABEL,
@@ -330,10 +330,17 @@ export default function TerrainGame({
   // Aimed block, updated by the render loop: drives E / the mobile button.
   const aimInfoRef = useRef<{ key: string; type: BlockType } | null>(null);
   const interact = () => {
-    if (anyMenuOpen()) return;
+    if (anyMenuOpen()) return false;
     const aim = aimInfoRef.current;
-    if (aim?.type === "chest") openChestAt(aim.key);
-    else openCrafting();
+    if (aim?.type === "chest") {
+      openChestAt(aim.key);
+      return true;
+    }
+    if (aim?.type === "crafting_table") {
+      openCrafting();
+      return true;
+    }
+    return false;
   };
 
   // Touch control bridge: the render loop reads these each frame.
@@ -466,7 +473,11 @@ export default function TerrainGame({
     (scene.fog as THREE.FogExp2).color = skyColor;
     // --- shared online world -------------------------------------------------
     const online = sessionRef.current;
+    // Everyone in the same world shares one day/night clock, started with it.
+    const worldEpoch = online?.startedAt ?? Date.now();
     let link: ReturnType<typeof connectWorld> | null = null;
+    // Set up once the player's body exists: spills everything on death.
+    let dropInventory: (() => void) | null = null;
     const world = createVoxelWorld(scene, {
       seed: online?.seed ?? 0,
       edits: online?.edits ?? [],
@@ -491,16 +502,37 @@ export default function TerrainGame({
           onHealth: (hp) => setHealthValue(hp),
           onHit: () => flashHurt(),
           onHurt: (id) => remotePlayers.flash(id),
-          onTeleport: (position) => teleportTo?.(position.x, position.y, position.z),
+          onDrops: (position, items) => {
+            const at = new THREE.Vector3(position.x, position.y, position.z);
+            for (const item of items) {
+              const type = item.type as ItemType;
+              const mesh = isPlaceable(type) ? world.makeBlockMesh(0.3, type) : makeHandItem(type);
+              if (!mesh) continue;
+              world.dropItem(at, type, item.count, mesh, 1200, item.id);
+            }
+          },
+          onPickup: (id) => world.removeDrop(id),
+          onTeleport: (position, reason) => {
+            if (reason === "respawn") dropInventory?.();
+            teleportTo?.(position.x, position.y, position.z);
+          },
         },
-        { name: usernameRef.current?.trim() || "Player", editsUpTo: online.editsUpTo },
+        {
+          name: usernameRef.current?.trim() || "Player",
+          editsUpTo: online.editsUpTo,
+          seed: online.seed,
+        },
       );
       linkRef.current = link;
     }
     let poseTimer = 0;
 
     // --- inventory -----------------------------------------------------------
-    const addToInventory = (type: BlockType) => addStack(type, 1);
+    const addToInventory = (type: string, count = 1, dropId?: string) => {
+      // Tell everyone else the item is gone so it disappears from their world.
+      if (dropId) link?.sendPickup(dropId);
+      addStack(type as ItemType, count);
+    };
     const takeFromInventory = (index: number) => {
       const slot = invRef.current[index];
       if (!slot) return false;
@@ -516,6 +548,42 @@ export default function TerrainGame({
     const character = new THREE.Group();
     character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
     scene.add(character);
+
+    // Death: everything the player was carrying spills onto the ground.
+    dropInventory = () => {
+      const spilled: Array<{ id: string; type: string; count: number }> = [];
+      const at = new THREE.Vector3();
+      const spill = (type: ItemType, count: number) => {
+        const mesh = isPlaceable(type) ? world.makeBlockMesh(0.3, type) : makeHandItem(type);
+        if (!mesh) return;
+        at.set(character.position.x, character.position.y + 1, character.position.z);
+        const id = `${CLIENT_ID}-${Date.now().toString(36)}-${spilled.length}`;
+        world.dropItem(at, type, count, mesh, 1200, id);
+        spilled.push({ id, type, count });
+      };
+      const spillAll = (slots: Slot[]) => {
+        for (let index = 0; index < slots.length; index += 1) {
+          const slot = slots[index];
+          if (!slot) continue;
+          slots[index] = null;
+          spill(slot.type, slot.count);
+        }
+      };
+      spillAll(invRef.current);
+      spillAll(craftRef.current);
+      spillAll(tableRef.current);
+      const held = cursorRef.current;
+      if (held) {
+        cursorRef.current = null;
+        setCursor(null);
+        spill(held.type, held.count);
+      }
+      syncInventory();
+      syncCraft();
+      syncTable();
+      // Everyone else spawns the same drops at the death spot.
+      link?.sendDrops({ x: at.x, y: at.y, z: at.z }, spilled);
+    };
 
     // Floating name tag above the player.
     const buildNameTexture = (text: string) => {
@@ -875,8 +943,8 @@ export default function TerrainGame({
           closeInventory();
           if (isE) {
             openMenu();
-            craftOpenRef.current = true;
-            setCraftOpen(true);
+            // Only the table/chest you are aiming at can open.
+            interact();
           }
         } else if (craftOpenRef.current) {
           closeCrafting();
@@ -886,13 +954,17 @@ export default function TerrainGame({
             setInvOpen(true);
           }
         } else if (!isEscape) {
-          openMenu();
           if (isT) {
+            openMenu();
             invOpenRef.current = true;
             setInvOpen(true);
           } else {
-            // E opens the chest you are looking at, otherwise the crafting table.
-            interact();
+            // E only works while looking at a chest or crafting table.
+            const aim = aimInfoRef.current;
+            if (aim?.type === "chest" || aim?.type === "crafting_table") {
+              openMenu();
+              interact();
+            }
           }
         }
         return;
@@ -1071,14 +1143,29 @@ export default function TerrainGame({
       // The model's forward axis is +Z, so it must face opposite the camera yaw.
       if (firstPersonView) character.rotation.y = cameraYaw + Math.PI;
 
-      verticalVelocity -= 12.5 * delta;
-      character.position.y += verticalVelocity * delta;
+      // Ladders: no gravity while touching one. Walk forward (or jump) to go
+      // up, crouch to go down, otherwise you simply hang on.
+      const onLadder =
+        world.isClimbable(character.position.x, character.position.y + 0.2, character.position.z) ||
+        world.isClimbable(character.position.x, character.position.y + 1.2, character.position.z);
+      if (onLadder) {
+        verticalVelocity = 0;
+        const crouching = Boolean(keys["ControlLeft"] || keys["KeyC"]);
+        if (speed > 0 || keys["Space"]) character.position.y += 3 * delta;
+        else if (crouching) character.position.y -= 3 * delta;
+      } else {
+        verticalVelocity -= 12.5 * delta;
+        character.position.y += verticalVelocity * delta;
+      }
       const groundY = world.groundHeight(
         character.position.x,
         character.position.z,
         character.position.y + 0.5,
       );
-      if (character.position.y <= groundY) {
+      if (onLadder) {
+        if (character.position.y < groundY) character.position.y = groundY;
+        grounded = true;
+      } else if (character.position.y <= groundY) {
         const heightCorrection = groundY - character.position.y;
         if (grounded && heightCorrection > 0.02) {
           // Climb onto the higher block over a few frames instead of teleporting.
@@ -1105,6 +1192,7 @@ export default function TerrainGame({
       if (link) {
         /* server-authoritative */
       } else if (healthRef.current <= 0) {
+        dropInventory?.();
         character.position.set(0.5, world.groundHeight(0.5, 0.5), 0.5);
         verticalVelocity = 0;
         setHealthValue(MAX_HEALTH);
@@ -1462,7 +1550,8 @@ export default function TerrainGame({
       }
 
       // --- day / night cycle -------------------------------------------------
-      const cycleT = (clock.elapsedTime % CYCLE_SECONDS) / CYCLE_SECONDS;
+      const worldSeconds = Math.max(0, (Date.now() - worldEpoch) / 1000);
+      const cycleT = (worldSeconds % CYCLE_SECONDS) / CYCLE_SECONDS;
       const cycleAngle = cycleT * Math.PI * 2;
       const sunDir = new THREE.Vector3(Math.cos(cycleAngle), Math.sin(cycleAngle), 0.35).normalize();
       const elevation = sunDir.y;
