@@ -28,10 +28,12 @@ function smoothNoise(x: number, z: number) {
   return THREE.MathUtils.lerp(THREE.MathUtils.lerp(a, b, ux), THREE.MathUtils.lerp(c, d, ux), uz);
 }
 
-function columnHeight(x: number, z: number) {
-  const base = smoothNoise(x * 0.055, z * 0.055) * 1.0;
-  const mid = smoothNoise(x * 0.13, z * 0.13) * 0.45;
-  const fine = smoothNoise(x * 0.31, z * 0.31) * 0.2;
+function columnHeight(x: number, z: number, seed = 0) {
+  const ox = seed * 123.456;
+  const oz = seed * 789.012;
+  const base = smoothNoise((x + ox) * 0.055, (z + oz) * 0.055) * 1.0;
+  const mid = smoothNoise((x + ox) * 0.13, (z + oz) * 0.13) * 0.45;
+  const fine = smoothNoise((x + ox) * 0.31, (z + oz) * 0.31) * 0.2;
   const ridge = Math.hypot(x, z) > 44 ? (Math.hypot(x, z) - 44) * 0.16 : 0;
   const h = 3 + (base + mid + fine) * 4.2 + ridge;
   return THREE.MathUtils.clamp(Math.round(h), 1, MAX_HEIGHT + 6);
@@ -219,7 +221,17 @@ export const BLOCK_TYPES: BlockType[] = [
   "furnace",
 ];
 
+// A single block change made by a player (block === null means it was mined).
+export type WorldEdit = { x: number; y: number; z: number; block: BlockType | null };
+
+export type WorldOptions = {
+  seed?: number;
+  edits?: WorldEdit[];
+  onEdit?: (edit: WorldEdit) => void;
+};
+
 export type VoxelWorld = {
+  applyRemoteEdit: (edit: WorldEdit) => void;
   groundHeight: (x: number, z: number, fromY?: number) => number;
   breakBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => boolean;
   pickBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => BlockCoord | null;
@@ -276,15 +288,19 @@ function crackTexture(stage: number) {
   return texture;
 }
 
-export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
+export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {}): VoxelWorld {
   const solid = new Map<string, BlockType>();
   const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  // Every player in the same online world generates from the same seed, so
+  // the terrain is identical for everyone.
+  const seed = options.seed ?? 0;
+  const seedNoise = (x: number, z: number) => hash2(x + seed * 31.7, z - seed * 17.3);
 
   for (let x = -WORLD_RADIUS; x <= WORLD_RADIUS; x += 1) {
     for (let z = -WORLD_RADIUS; z <= WORLD_RADIUS; z += 1) {
-      const top = columnHeight(x, z);
+      const top = columnHeight(x, z, seed);
       // Grass/dirt skin is 4-5 blocks deep; everything under it is stone.
-      const soil = hash2(x * 4.4 + 2.1, z * 6.8 + 9.7) > 0.5 ? 5 : 4;
+      const soil = seedNoise(x * 4.4 + 2.1, z * 6.8 + 9.7) > 0.5 ? 5 : 4;
       for (let y = 0; y < top; y += 1) {
         solid.set(key(x, y, z), y >= top - soil ? "grass" : "stone");
       }
@@ -295,12 +311,12 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const trees: Array<[number, number]> = [];
   for (let x = -WORLD_RADIUS + 3; x <= WORLD_RADIUS - 3; x += 1) {
     for (let z = -WORLD_RADIUS + 3; z <= WORLD_RADIUS - 3; z += 1) {
-      if (hash2(x * 1.7 + 11.3, z * 2.3 + 7.1) < 0.978) continue;
+      if (seedNoise(x * 1.7 + 11.3, z * 2.3 + 7.1) < 0.978) continue;
       if (Math.hypot(x, z) < 5) continue; // keep the spawn area clear
       if (trees.some(([tx, tz]) => Math.abs(tx - x) < 5 && Math.abs(tz - z) < 5)) continue;
       trees.push([x, z]);
-      const base = columnHeight(x, z);
-      const trunk = 4 + Math.floor(hash2(x * 3.1, z * 5.7) * 3);
+      const base = columnHeight(x, z, seed);
+      const trunk = 4 + Math.floor(seedNoise(x * 3.1, z * 5.7) * 3);
       for (let y = base; y < base + trunk; y += 1) solid.set(key(x, y, z), "wood");
       const crown = base + trunk;
       // leaf canopy: two wide layers, then a tapered cap
@@ -320,6 +336,12 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
       }
       solid.set(key(x, crown + 2, z), "leaves");
     }
+  }
+
+  // Replay every block other players already mined or placed in this world.
+  for (const edit of options.edits ?? []) {
+    if (edit.block) solid.set(key(edit.x, edit.y, edit.z), edit.block);
+    else solid.delete(key(edit.x, edit.y, edit.z));
   }
 
   const isSolid = (x: number, y: number, z: number) => solid.has(key(x, y, z));
@@ -524,7 +546,23 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     rebuild();
     crackMesh.visible = false;
     outline.visible = false;
+    options.onEdit?.({ x: block[0], y: block[1], z: block[2], block: null });
   };
+
+  // A change made by another player: no drops for us, just the world update.
+  const applyRemoteEdit = (edit: WorldEdit) => {
+    const id = key(edit.x, edit.y, edit.z);
+    const current = solid.get(id) ?? null;
+    if (current === edit.block) return;
+    if (edit.block) {
+      solid.set(id, edit.block);
+    } else {
+      if (current) spawnDebris(new THREE.Vector3(edit.x + 0.5, edit.y + 0.5, edit.z + 0.5), current);
+      solid.delete(id);
+    }
+    rebuild();
+  };
+
 
   const rayHit = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => {
     raycaster.set(origin, direction.clone().normalize());
@@ -567,6 +605,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     }
     solid.set(key(target[0], target[1], target[2]), type);
     rebuild();
+    options.onEdit?.({ x: target[0], y: target[1], z: target[2], block: type });
     return true;
   };
 
@@ -690,6 +729,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   };
 
   return {
+    applyRemoteEdit,
     groundHeight,
     breakBlock,
     pickBlock,
