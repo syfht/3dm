@@ -28,6 +28,7 @@ export const BLOCK_LABEL: Record<ItemType, string> = {
   crafting_table: "Crafting Table",
   chest: "Chest",
   furnace: "Furnace",
+  ladder: "Ladder",
   stick: "Stick",
   wooden_sword: "Wooden Sword",
   wooden_pickaxe: "Wooden Pickaxe",
@@ -51,12 +52,13 @@ export const BREAK_TIMES: Record<BlockType, number> = {
   crafting_table: 1.4,
   chest: 1.6,
   furnace: 6.5,
+  ladder: 0.4,
 };
 
 // Which tool speeds up which block, and by how much.
 const TOOL_TARGETS: Record<ToolKind, BlockType[]> = {
   pickaxe: ["stone", "furnace"],
-  axe: ["wood", "planks", "crafting_table", "chest"],
+  axe: ["wood", "planks", "crafting_table", "chest", "ladder"],
   shovel: ["grass"],
   sword: ["leaves"],
   hoe: [],
@@ -95,6 +97,8 @@ const plainRecipes: Array<{ rows: string[]; result: { type: ItemType; count: num
   { rows: ["PPP", "P P", "PPP"], result: { type: "chest", count: 1 } },
   // 8 cobblestone in a ring -> furnace
   { rows: ["CCC", "C C", "CCC"], result: { type: "furnace", count: 1 } },
+  // 7 sticks -> 3 ladders
+  { rows: ["S S", "SSS", "S S"], result: { type: "ladder", count: 3 } },
 ];
 
 // Trim empty rows/columns so a recipe can sit anywhere in the grid.
