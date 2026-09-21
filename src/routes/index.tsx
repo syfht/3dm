@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import TerrainGame from "@/components/TerrainGame";
+import GameShell from "@/components/GameShell";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -12,5 +12,5 @@ export const Route = createFileRoute("/")({
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
-  component: TerrainGame,
+  component: GameShell,
 });
