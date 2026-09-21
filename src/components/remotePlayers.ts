@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { RemotePose } from "@/lib/multiplayer";
+import type { ItemType } from "./inventory";
 
 // Other players in the world. They use the same character model as the local
 // player (cloned once it has finished loading), with a walk cycle and the same
@@ -150,9 +151,17 @@ type Avatar = {
   attack: RemotePose["attack"];
   attackProgress: number;
   name: string;
+  hand: THREE.Object3D | null;
+  handScale: number;
+  item: ItemType | null;
+  itemMesh: THREE.Object3D | null;
+  verticalVelocity: number;
 };
 
-export function createRemotePlayers(scene: THREE.Scene) {
+export function createRemotePlayers(
+  scene: THREE.Scene,
+  options: { makeItem?: (type: ItemType) => THREE.Object3D | null } = {},
+) {
   const avatars = new Map<string, Avatar>();
   let template: THREE.Object3D | null = null;
 
@@ -178,6 +187,31 @@ export function createRemotePlayers(scene: THREE.Scene) {
       avatar.rest.set(bone, bone.quaternion.clone());
     }
     avatar.poses = buildAttackPoses(body, avatar.limbs);
+    const handBone = findBone(body, "R_Hand_Attach") ?? findBone(body, "R_Hand_");
+    avatar.hand = handBone ?? null;
+    avatar.handScale = handBone
+      ? handBone.getWorldScale(new THREE.Vector3()).x || 1
+      : 1;
+    avatar.itemMesh = null;
+    const wanted = avatar.item;
+    avatar.item = null;
+    if (wanted) setItem(avatar, wanted);
+  };
+
+  // Shows the block or tool the other player currently has selected.
+  const setItem = (avatar: Avatar, type: ItemType | null) => {
+    if (avatar.item === type) return;
+    avatar.item = type;
+    if (avatar.itemMesh) {
+      avatar.itemMesh.parent?.remove(avatar.itemMesh);
+      avatar.itemMesh = null;
+    }
+    if (!type || !avatar.hand || !options.makeItem) return;
+    const mesh = options.makeItem(type);
+    if (!mesh) return;
+    mesh.scale.setScalar(1 / avatar.handScale);
+    avatar.hand.add(mesh);
+    avatar.itemMesh = mesh;
   };
 
   const build = (id: string, name: string) => {
@@ -206,6 +240,11 @@ export function createRemotePlayers(scene: THREE.Scene) {
       attack: null,
       attackProgress: 0,
       name,
+      hand: null,
+      handScale: 1,
+      item: null,
+      itemMesh: null,
+      verticalVelocity: 0,
     };
     attachBody(avatar);
     avatars.set(id, avatar);
@@ -244,21 +283,55 @@ export function createRemotePlayers(scene: THREE.Scene) {
         avatar.sprite.material.needsUpdate = true;
         old?.dispose();
       }
-      avatar.target.set(player.x, player.y, player.z);
+      const networkY = player.y;
+      if (networkY > avatar.target.y + 0.08) avatar.verticalVelocity = 0;
+      avatar.target.set(player.x, networkY, player.z);
       avatar.targetYaw = player.ry;
       avatar.moving = player.moving;
       avatar.attack = player.attack ?? null;
       avatar.attackProgress = player.ap ?? 0;
+      setItem(avatar, player.item ?? null);
     }
     for (const id of [...avatars.keys()]) if (!seen.has(id)) remove(id);
+  };
+
+  // Which player, if any, the given ray (the crosshair) is aimed at. Test a
+  // vertical capsule so aiming at the head, torso, or legs all registers.
+  const hitCentre = new THREE.Vector3();
+  const toCentre = new THREE.Vector3();
+  const hitTest = (origin: THREE.Vector3, direction: THREE.Vector3, maxDistance: number) => {
+    const radius = 0.68;
+    let best: { id: string; distance: number } | null = null;
+    for (const [id, avatar] of avatars) {
+      for (const height of [0.45, 1.05, 1.62]) {
+        hitCentre.copy(avatar.group.position);
+        hitCentre.y += height;
+        toCentre.copy(hitCentre).sub(origin);
+        const along = toCentre.dot(direction);
+        if (along < 0 || along > maxDistance) continue;
+        const perpendicular = Math.sqrt(Math.max(0, toCentre.lengthSq() - along * along));
+        if (perpendicular <= radius && (!best || along < best.distance)) best = { id, distance: along };
+      }
+    }
+    return best?.id ?? null;
   };
 
   const swingAxis = new THREE.Vector3(1, 0, 0);
   const swingQuaternion = new THREE.Quaternion();
   const targetQuaternion = new THREE.Quaternion();
 
-  const update = (delta: number) => {
+  const update = (delta: number, groundHeight?: (x: number, z: number, y: number) => number) => {
     for (const avatar of avatars.values()) {
+      if (groundHeight) {
+        const groundY = groundHeight(avatar.target.x, avatar.target.z, avatar.target.y + 0.5);
+        if (avatar.target.y > groundY + 0.001) {
+          avatar.verticalVelocity -= 12.5 * delta;
+          avatar.target.y = Math.max(groundY, avatar.target.y + avatar.verticalVelocity * delta);
+        } else {
+          avatar.target.y = groundY;
+          avatar.verticalVelocity = 0;
+        }
+      }
       // Smooth out the gaps between network updates.
       const blend = 1 - Math.exp(-12 * delta);
       avatar.group.position.lerp(avatar.target, blend);
@@ -335,5 +408,5 @@ export function createRemotePlayers(scene: THREE.Scene) {
     for (const id of [...avatars.keys()]) remove(id);
   };
 
-  return { setPlayers, setTemplate, update, dispose, count: () => avatars.size };
+  return { setPlayers, setTemplate, update, hitTest, dispose, count: () => avatars.size };
 }
