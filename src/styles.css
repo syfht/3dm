@@ -715,9 +715,212 @@
     border-radius: 6px;
     animation: rotate-hint 1.6s ease-in-out infinite;
   }
+
+  .inventory-close[aria-pressed="true"] {
+    background: color-mix(in oklab, var(--hud-foreground) 78%, transparent);
+    color: var(--hud);
+  }
+
+  .inventory-hint {
+    margin: 0.85rem 0 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    opacity: 0.72;
+    text-align: center;
+  }
+
+  .start-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.75rem;
+    padding: clamp(1.25rem, 5vh, 2.75rem) 1.5rem 1.5rem;
+    pointer-events: none;
+  }
+
+  .start-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(2.6rem, 8vw, 5.5rem);
+    line-height: 0.9;
+    letter-spacing: 0.01em;
+    color: #ffffff;
+    text-shadow: 0 3px 0 rgba(0 0 0 / 0.35), 0 8px 22px rgba(0 0 0 / 0.5);
+    text-align: center;
+  }
+
+  .start-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 1.5rem;
+    width: 100%;
+    max-width: 60rem;
+  }
+
+  .start-card {
+    pointer-events: auto;
+    width: min(22rem, 92vw);
+    padding: 1.4rem;
+    border-radius: 16px;
+    background: #ffffff;
+    border: 1px solid rgba(0 0 0 / 0.12);
+    box-shadow: 0 14px 44px rgba(0 0 0 / 0.4);
+  }
+
+  .start-card label {
+    display: block;
+    margin: 0 0 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #8a8a8a;
+  }
+
+  .start-input {
+    width: 100%;
+    min-height: 3rem;
+    box-sizing: border-box;
+    padding: 0 0.9rem;
+    border: 1px solid #cfcfcf;
+    border-radius: 8px;
+    background: #f0f0f0;
+    color: #333333;
+    font-size: 1rem;
+    font-family: inherit;
+  }
+
+  .start-input:focus-visible {
+    outline: 2px solid #8ae764;
+    outline-offset: 1px;
+  }
+
+  .start-button {
+    margin-top: 1rem;
+    width: 100%;
+    min-height: 3rem;
+    border: none;
+    border-radius: 8px;
+    background: #8ae764;
+    color: #ffffff;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 0 4px 0 #5fb83f;
+    transition: transform 80ms ease, box-shadow 80ms ease;
+  }
+
+  .start-button:hover {
+    transform: translateY(-1px);
+  }
+
+  .start-button:active {
+    transform: translateY(2px);
+    box-shadow: 0 2px 0 #5fb83f;
+  }
+
+  .start-keybinds {
+    pointer-events: auto;
+    width: min(20rem, 92vw);
+    max-height: 26rem;
+    overflow: auto;
+    padding: 1.2rem 1.4rem;
+    border-radius: 16px;
+    background: #ffffff;
+    border: 1px solid rgba(0 0 0 / 0.12);
+    box-shadow: 0 14px 44px rgba(0 0 0 / 0.4);
+  }
+
+  .start-keybinds h2 {
+    margin: 0 0 0.9rem;
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    color: #000000;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .keybind-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .keybind-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.82rem;
+  }
+
+  .keybind-label {
+    color: #888888;
+  }
+
+  .keybind-key {
+    font-weight: 800;
+    color: #333333;
+    text-align: right;
+    white-space: nowrap;
+  }
 }
 
 @keyframes rotate-hint {
   0%, 20% { transform: rotate(0deg); }
   60%, 100% { transform: rotate(90deg); }
+}
+
+.loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: #0b1220;
+}
+
+.loading-card {
+  width: min(420px, 86vw);
+  text-align: center;
+}
+
+.loading-title {
+  margin-bottom: 1.25rem;
+}
+
+.loading-copy {
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.95rem;
+  margin-bottom: 0.75rem;
+}
+
+.loading-bar {
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+}
+
+.loading-bar-fill {
+  height: 100%;
+  background: #8ae764;
+  transition: width 0.2s ease-out;
+}
+
+.loading-percent {
+  margin-top: 0.6rem;
+  color: #fff;
+  font-weight: 700;
 }
