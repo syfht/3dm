@@ -1,6 +1,8 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { BlockType, WorldEdit } from "@/components/voxelWorld";
+import type { ItemType } from "@/components/inventory";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+import { startBackgroundTicker } from "./backgroundTicker";
 
 // Every browser tab gets its own player id for the session.
 export const CLIENT_ID =
@@ -23,6 +25,12 @@ export type RemotePose = {
   z: number;
   ry: number;
   moving: boolean;
+  /** Current attack animation, when the player is mid-swing. */
+  attack?: "punch" | "kick" | "combo" | null;
+  /** Attack progress from 0 to 1. */
+  ap?: number;
+  /** Block or tool currently held in the hand. */
+  item?: ItemType | null;
 };
 
 const OFFLINE: WorldSession = { worldId: null, seed: 0, edits: [], online: false };
@@ -87,6 +95,7 @@ export async function touchWorld(worldId: string) {
 export type WorldChannel = {
   sendPose: (pose: Omit<RemotePose, "id">) => void;
   sendEdit: (edit: WorldEdit) => void;
+  sendHit: (targetId: string, amount: number) => void;
   dispose: () => void;
 };
 
@@ -96,46 +105,68 @@ export function connectWorld(
   handlers: {
     onEdit: (edit: WorldEdit) => void;
     onPlayers: (players: RemotePose[]) => void;
+    onHit?: (amount: number, from: string) => void;
   },
 ): WorldChannel {
   const channel: RealtimeChannel = supabase.channel(`world-${worldId}`, {
     config: { broadcast: { self: false } },
   });
 
-  // Poses arrive as fast broadcasts; a player disappears when their updates
-  // stop coming in (tab closed, lost connection).
-  const poses = new Map<string, { pose: RemotePose; at: number }>();
+  // Who is in the world comes from presence (players stay visible while their
+  // tab is connected, even if they stand perfectly still); poses arrive as
+  // fast broadcasts on top of that roster.
+  const poses = new Map<string, RemotePose>();
+  const lastSeen = new Map<string, number>();
+  let roster = new Set<string>();
+
   const publish = () => {
-    handlers.onPlayers([...poses.values()].map((entry) => entry.pose));
-  };
-  const prune = setInterval(() => {
-    const cutoff = Date.now() - 6000;
-    let changed = false;
-    for (const [id, entry] of poses) {
-      if (entry.at < cutoff) {
-        poses.delete(id);
-        changed = true;
-      }
+    const list: RemotePose[] = [];
+    for (const id of roster) {
+      const pose = poses.get(id);
+      if (pose) list.push(pose);
     }
-    if (changed) publish();
-  }, 2000);
+    handlers.onPlayers(list);
+  };
 
   channel
+    .on("presence", { event: "sync" }, () => {
+      const state = channel.presenceState<{ pose?: RemotePose }>();
+      const next = new Set<string>();
+      const now = Date.now();
+      for (const [key, entries] of Object.entries(state)) {
+        if (key === CLIENT_ID) continue;
+        next.add(key);
+        const seeded = entries?.[0]?.pose;
+        // Presence is the slow fallback: only use it when live pose
+        // broadcasts for that player have gone quiet.
+        if (seeded && now - (lastSeen.get(key) ?? 0) > 2500) {
+          poses.set(key, { ...seeded, id: key });
+        }
+      }
+      for (const id of [...poses.keys()]) if (!next.has(id)) { poses.delete(id); lastSeen.delete(id); }
+      roster = next;
+      publish();
+    })
+
     .on("broadcast", { event: "pose" }, ({ payload }) => {
       const pose = payload as RemotePose;
       if (!pose?.id || pose.id === CLIENT_ID) return;
-      const isNew = !poses.has(pose.id);
-      poses.set(pose.id, { pose, at: Date.now() });
-      if (isNew) publish();
-      else {
-        const known = poses.get(pose.id)!;
-        known.pose = pose;
-        publish();
-      }
+      poses.set(pose.id, pose);
+      lastSeen.set(pose.id, Date.now());
+      if (!roster.has(pose.id)) roster.add(pose.id);
+      publish();
     })
     .on("broadcast", { event: "leave" }, ({ payload }) => {
       const id = (payload as { id?: string })?.id;
-      if (id && poses.delete(id)) publish();
+      if (!id) return;
+      poses.delete(id);
+      roster.delete(id);
+      publish();
+    })
+    .on("broadcast", { event: "hit" }, ({ payload }) => {
+      const hit = payload as { target?: string; amount?: number; from?: string };
+      if (hit?.target !== CLIENT_ID || !hit.amount) return;
+      handlers.onHit?.(hit.amount, hit.from ?? "");
     })
     .on("broadcast", { event: "edit" }, ({ payload }) => {
       const edit = payload as WorldEdit & { actor?: string };
@@ -145,10 +176,63 @@ export function connectWorld(
     ;
 
   let ready = false;
+  let lastPose: Omit<RemotePose, "id"> | null = null;
+  let claimingHits = false;
+  const claimHits = async () => {
+    if (claimingHits) return;
+    claimingHits = true;
+    try {
+      const { data } = await supabase.rpc("claim_world_hits", {
+        p_world: worldId,
+        p_target: CLIENT_ID,
+      });
+      for (const hit of data ?? []) handlers.onHit?.(hit.amount, hit.attacker_id);
+    } finally {
+      claimingHits = false;
+    }
+  };
+  let syncingEdits = false;
+  const syncEdits = async () => {
+    if (syncingEdits) return;
+    syncingEdits = true;
+    try {
+      const { data } = await supabase
+        .from("world_blocks")
+        .select("x,y,z,block")
+        .eq("world_id", worldId);
+      for (const edit of data ?? []) {
+        handlers.onEdit({ x: edit.x, y: edit.y, z: edit.z, block: (edit.block as BlockType | null) ?? null });
+      }
+    } finally {
+      syncingEdits = false;
+    }
+  };
   channel.subscribe((status) => {
     ready = status === "SUBSCRIBED";
-    if (status !== "SUBSCRIBED") console.warn("[multiplayer] live link:", status);
+    if (status === "SUBSCRIBED") {
+      void channel.track({ pose: lastPose ? { ...lastPose, id: CLIENT_ID } : null });
+      void claimHits();
+    } else {
+      console.warn("[multiplayer] live link:", status);
+    }
   });
+
+  // Refresh our presence entry now and then so players who join later see us
+  // at the right spot before our next pose broadcast reaches them, and so the
+  // websocket keeps seeing traffic. Background tabs throttle normal timers,
+  // which used to drop the connection (and the player) after a few seconds
+  // away, so this runs off a worker ticker instead.
+  let ticks = 0;
+  const stopTicker = startBackgroundTicker(() => {
+    ticks += 1;
+    if (ticks % 5 === 0) {
+      void claimHits();
+      void syncEdits();
+      if (ready && lastPose) void channel.track({ pose: { ...lastPose, id: CLIENT_ID } });
+    }
+
+  }, 1000);
+
 
   // Database changes live on their own channel: if that subscription is
   // rejected it must not take the live player/block broadcasts down with it.
@@ -169,11 +253,20 @@ export function connectWorld(
         handlers.onEdit({ x: row.x, y: row.y, z: row.z, block: (row.block as BlockType | null) ?? null });
       },
     )
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "world_hits", filter: `world_id=eq.${worldId}` },
+      (payload) => {
+        const hit = payload.new as { target_id?: string } | null;
+        if (hit?.target_id === CLIENT_ID) void claimHits();
+      },
+    )
     .subscribe();
 
 
   return {
     sendPose: (pose) => {
+      lastPose = pose;
       if (!ready) return;
       void channel.send({
         type: "broadcast",
@@ -189,8 +282,19 @@ export function connectWorld(
       });
       void saveEdit(worldId, edit);
     },
+    sendHit: (targetId, amount) => {
+      if (!ready) return;
+      // Persist first: broadcasts are intentionally ephemeral and can be lost
+      // while the receiving browser has suspended its websocket in a hidden tab.
+      void supabase.from("world_hits").insert({
+        world_id: worldId,
+        target_id: targetId,
+        attacker_id: CLIENT_ID,
+        amount,
+      });
+    },
     dispose: () => {
-      clearInterval(prune);
+      stopTicker();
       if (ready) void channel.send({ type: "broadcast", event: "leave", payload: { id: CLIENT_ID } });
       void supabase.removeChannel(channel);
       void supabase.removeChannel(dbChannel);
