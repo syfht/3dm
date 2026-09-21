@@ -1,6 +1,9 @@
 import { BLOCK_LABEL, HOTBAR_SIZE, craftResult, type Slot } from "./inventory";
+import PlayerPreview from "./PlayerPreview";
 
 type Props = {
+  title: string;
+  largeGrid?: boolean;
   inventory: Slot[];
   craftGrid: Slot[];
   cursor: Slot;
@@ -22,6 +25,8 @@ function SlotIcon({ slot }: { slot: Slot }) {
 }
 
 export default function InventoryPanel({
+  title,
+  largeGrid = false,
   inventory,
   craftGrid,
   cursor,
@@ -55,16 +60,16 @@ export default function InventoryPanel({
       onMouseMove={(event) => onCursorMove(event.clientX, event.clientY)}
       onContextMenu={(event) => event.preventDefault()}
     >
-      <div className="inventory-panel" role="dialog" aria-label="Inventory">
+      <div className="inventory-panel" role="dialog" aria-label={title}>
         <header className="inventory-head">
-          <h2>Inventory</h2>
+          <h2>{title}</h2>
           <button type="button" className="inventory-close" onClick={onClose}>
-            Close (T)
+            Close
           </button>
         </header>
 
         <section className="crafting-row" aria-label="Crafting">
-          <div className="craft-grid">
+          <div className={largeGrid ? "craft-grid is-3x3" : "craft-grid"}>
             {craftGrid.map((slot, index) => slotButton(slot, "craft", index))}
           </div>
           <span className="craft-arrow" aria-hidden="true">
@@ -82,11 +87,7 @@ export default function InventoryPanel({
           >
             <SlotIcon slot={result} />
           </button>
-          <p className="craft-hint">
-            1 Wood Log → 4 Planks
-            <br />
-            4 Planks → 1 Crafting Table
-          </p>
+          <PlayerPreview />
         </section>
 
         <div className="inv-grid" aria-label="Storage">
