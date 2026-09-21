@@ -7,6 +7,8 @@ import { createVoxelWorld, type BlockType } from "./voxelWorld";
 import InventoryPanel from "./InventoryPanel";
 import MobileControls from "./MobileControls";
 import { makeHandItem } from "./handItems";
+import { createRemotePlayers } from "./remotePlayers";
+import { connectWorld, touchWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
 import {
   BLOCK_LABEL,
   BREAK_TIMES,
@@ -69,14 +71,18 @@ const CYCLE_SECONDS = 600;
 export default function TerrainGame({
   username = "Player",
   disabled = false,
+  session,
   onProgress,
   onReady,
 }: {
   username?: string;
   disabled?: boolean;
+  session?: WorldSession;
   onProgress?: (percent: number) => void;
   onReady?: () => void;
 }) {
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const onProgressRef = useRef(onProgress);
   const onReadyRef = useRef(onReady);
   onProgressRef.current = onProgress;
@@ -87,6 +93,7 @@ export default function TerrainGame({
   const setNameTagRef = useRef<(name: string) => void>(() => {});
   const [loaded, setLoaded] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [playerCount, setPlayerCount] = useState(1);
   const [health, setHealth] = useState(MAX_HEALTH);
   const healthRef = useRef(MAX_HEALTH);
   const setHealthValue = (value: number) => {
@@ -437,7 +444,31 @@ export default function TerrainGame({
     const skyColor = new THREE.Color().copy(skyDay);
     scene.background = skyColor;
     (scene.fog as THREE.FogExp2).color = skyColor;
-    const world = createVoxelWorld(scene);
+    // --- shared online world -------------------------------------------------
+    const online = sessionRef.current;
+    let link: ReturnType<typeof connectWorld> | null = null;
+    const world = createVoxelWorld(scene, {
+      seed: online?.seed ?? 0,
+      edits: online?.edits ?? [],
+      onEdit: (edit) => link?.sendEdit(edit),
+    });
+    const remotePlayers = createRemotePlayers(scene);
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    if (online?.online && online.worldId) {
+      const worldId = online.worldId;
+      link = connectWorld(worldId, {
+        onEdit: (edit) => world.applyRemoteEdit(edit),
+        onPlayers: (players: RemotePose[]) => {
+          remotePlayers.setPlayers(players);
+          setPlayerCount(players.length + 1);
+        },
+      });
+      // Keeps the world alive while anyone is playing; after 30 idle minutes
+      // the next player to join gets a brand new terrain.
+      heartbeat = setInterval(() => void touchWorld(worldId), 60000);
+      void touchWorld(worldId);
+    }
+    let poseTimer = 0;
 
     // --- inventory -----------------------------------------------------------
     const addToInventory = (type: BlockType) => addStack(type, 1);
@@ -654,6 +685,8 @@ export default function TerrainGame({
       aimBone(bones.leftLowerLeg, (_dir, side) => new THREE.Vector3(side * 0.03, -1, 0.02));
       aimBone(bones.rightLowerLeg, (_dir, side) => new THREE.Vector3(side * 0.03, -1, 0.02));
       loadedModel.updateMatrixWorld(true);
+      // Other players use the same character, in this same relaxed pose.
+      remotePlayers.setTemplate(loadedModel);
 
       // Attack keyframes: wind up with the right fist drawn back, then a
       // straight punch fully extended forward (model forward is +Z).
@@ -1397,6 +1430,21 @@ export default function TerrainGame({
 
       nameSprite.visible = !firstPersonView;
 
+      // --- multiplayer sync ---------------------------------------------------
+      remotePlayers.update(delta);
+      poseTimer -= delta;
+      if (link && poseTimer <= 0) {
+        poseTimer = 0.1;
+        link.sendPose({
+          name: usernameRef.current?.trim() || "Player",
+          x: character.position.x,
+          y: character.position.y,
+          z: character.position.z,
+          ry: character.rotation.y,
+          moving: speed > 0,
+        });
+      }
+
       const nowMoving = speed > 0;
       if (nowMoving !== lastMovingState) {
         lastMovingState = nowMoving;
@@ -1426,6 +1474,9 @@ export default function TerrainGame({
       renderer.domElement.removeEventListener("pointermove", onTouchMove);
       renderer.domElement.removeEventListener("contextmenu", onContextMenu);
       renderer.domElement.removeEventListener("wheel", onWheel);
+      if (heartbeat) clearInterval(heartbeat);
+      link?.dispose();
+      remotePlayers.dispose();
       world.dispose();
       renderer.dispose();
 
@@ -1443,7 +1494,10 @@ export default function TerrainGame({
       </div>
 
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-end p-5 sm:p-7">
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-end gap-2 p-5 sm:p-7">
+        <div className="game-status" aria-live="polite">
+          TOTAL PLAYERS: {playerCount}
+        </div>
         <div className="game-status" aria-live="polite">
           <span className={loaded ? "status-light is-ready" : "status-light"} />
           {loaded ? (attackLabel ?? (moving ? "MOVING" : "READY")) : "LOADING MODEL"}
