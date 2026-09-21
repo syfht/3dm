@@ -41,12 +41,18 @@ type TextureKind =
   | "grass_top"
   | "grass_side"
   | "dirt"
+  | "stone"
   | "wood_top"
   | "wood_side"
   | "leaves"
   | "planks"
   | "table_top"
-  | "table_side";
+  | "table_side"
+  | "chest_top"
+  | "chest_side"
+  | "chest_front"
+  | "furnace_side"
+  | "furnace_front";
 
 function blockTexture(kind: TextureKind) {
   const size = 32;
@@ -70,6 +76,55 @@ function blockTexture(kind: TextureKind) {
     paintNoise(0, size, [104, 158, 74], 46);
   } else if (kind === "dirt") {
     paintNoise(0, size, [128, 94, 62], 42);
+  } else if (kind === "stone") {
+    paintNoise(0, size, [124, 124, 126], 34);
+    // cobble-like clumps
+    for (let i = 0; i < 46; i += 1) {
+      const x = Math.floor(hash2(i * 1.9, 4.2) * size);
+      const y = Math.floor(hash2(i * 2.7, 8.6) * size);
+      const s = 2 + Math.floor(hash2(i, 1.1) * 3);
+      ctx.fillStyle = hash2(i, 6.3) > 0.5 ? "rgba(92,92,96,0.55)" : "rgba(160,160,164,0.45)";
+      ctx.fillRect(x, y, s, s);
+    }
+  } else if (kind === "chest_top") {
+    paintNoise(0, size, [148, 106, 56], 18);
+    ctx.fillStyle = "rgba(62,42,20,0.85)";
+    ctx.fillRect(0, 0, size, 2);
+    ctx.fillRect(0, size - 2, size, 2);
+    ctx.fillRect(0, 0, 2, size);
+    ctx.fillRect(size - 2, 0, 2, size);
+  } else if (kind === "chest_side" || kind === "chest_front") {
+    paintNoise(0, size, [146, 104, 54], 18);
+    ctx.fillStyle = "rgba(62,42,20,0.85)";
+    ctx.fillRect(0, 10, size, 2);
+    ctx.fillRect(0, 0, size, 2);
+    ctx.fillRect(0, size - 2, size, 2);
+    ctx.fillRect(0, 0, 2, size);
+    ctx.fillRect(size - 2, 0, 2, size);
+    if (kind === "chest_front") {
+      // latch
+      ctx.fillStyle = "rgb(216,190,96)";
+      ctx.fillRect(size / 2 - 3, 8, 6, 7);
+      ctx.fillStyle = "rgba(60,48,12,0.8)";
+      ctx.fillRect(size / 2 - 1, 10, 2, 3);
+    }
+  } else if (kind === "furnace_side" || kind === "furnace_front") {
+    paintNoise(0, size, [112, 112, 116], 26);
+    for (let i = 0; i < 40; i += 1) {
+      const x = Math.floor(hash2(i * 3.1, 2.4) * size);
+      const y = Math.floor(hash2(i * 1.3, 7.1) * size);
+      ctx.fillStyle = hash2(i, 5.5) > 0.5 ? "rgba(84,84,88,0.5)" : "rgba(148,148,152,0.4)";
+      ctx.fillRect(x, y, 3, 3);
+    }
+    if (kind === "furnace_front") {
+      // dark opening with a brick lip
+      ctx.fillStyle = "rgb(58,54,52)";
+      ctx.fillRect(6, 12, size - 12, 14);
+      ctx.fillStyle = "rgb(38,34,32)";
+      ctx.fillRect(8, 16, size - 16, 10);
+      ctx.fillStyle = "rgba(78,78,82,0.9)";
+      ctx.fillRect(6, 8, size - 12, 3);
+    }
   } else if (kind === "grass_side") {
     paintNoise(0, size, [128, 94, 62], 42);
     paintNoise(0, 8, [104, 158, 74], 46);
@@ -143,9 +198,26 @@ function blockTexture(kind: TextureKind) {
 
 export type BlockCoord = [number, number, number];
 
-export type BlockType = "grass" | "wood" | "leaves" | "planks" | "crafting_table";
+export type BlockType =
+  | "grass"
+  | "stone"
+  | "wood"
+  | "leaves"
+  | "planks"
+  | "crafting_table"
+  | "chest"
+  | "furnace";
 
-export const BLOCK_TYPES: BlockType[] = ["grass", "wood", "leaves", "planks", "crafting_table"];
+export const BLOCK_TYPES: BlockType[] = [
+  "grass",
+  "stone",
+  "wood",
+  "leaves",
+  "planks",
+  "crafting_table",
+  "chest",
+  "furnace",
+];
 
 export type VoxelWorld = {
   groundHeight: (x: number, z: number, fromY?: number) => number;
@@ -211,7 +283,11 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   for (let x = -WORLD_RADIUS; x <= WORLD_RADIUS; x += 1) {
     for (let z = -WORLD_RADIUS; z <= WORLD_RADIUS; z += 1) {
       const top = columnHeight(x, z);
-      for (let y = 0; y < top; y += 1) solid.set(key(x, y, z), "grass");
+      // Grass/dirt skin is 4-5 blocks deep; everything under it is stone.
+      const soil = hash2(x * 4.4 + 2.1, z * 6.8 + 9.7) > 0.5 ? 5 : 4;
+      for (let y = 0; y < top; y += 1) {
+        solid.set(key(x, y, z), y >= top - soil ? "grass" : "stone");
+      }
     }
   }
 
@@ -270,16 +346,28 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const planks = mat("planks");
   const tableTop = mat("table_top");
   const tableSide = mat("table_side");
+  const stone = mat("stone");
+  const chestTop = mat("chest_top");
+  const chestSide = mat("chest_side");
+  const chestFront = mat("chest_front");
+  const furnaceSide = mat("furnace_side");
+  const furnaceFront = mat("furnace_front");
 
-  const allMaterials = [grassTop, grassSide, dirt, woodTop, woodSide, leaves, planks, tableTop, tableSide];
+  const allMaterials = [
+    grassTop, grassSide, dirt, woodTop, woodSide, leaves, planks, tableTop, tableSide,
+    stone, chestTop, chestSide, chestFront, furnaceSide, furnaceFront,
+  ];
 
   // material order: +x, -x, +y, -y, +z, -z
   const materialsByType: Record<BlockType, THREE.Material[]> = {
     grass: [grassSide, grassSide, grassTop, dirt, grassSide, grassSide],
+    stone: [stone, stone, stone, stone, stone, stone],
     wood: [woodSide, woodSide, woodTop, woodTop, woodSide, woodSide],
     leaves: [leaves, leaves, leaves, leaves, leaves, leaves],
     planks: [planks, planks, planks, planks, planks, planks],
     crafting_table: [tableSide, tableSide, tableTop, planks, tableSide, tableSide],
+    chest: [chestSide, chestSide, chestTop, chestTop, chestFront, chestSide],
+    furnace: [furnaceSide, furnaceSide, stone, stone, furnaceFront, furnaceSide],
   };
 
   type Layer = { mesh: THREE.InstancedMesh; blocks: BlockCoord[]; capacity: number };
@@ -299,9 +387,9 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   for (const type of BLOCK_TYPES) layers[type] = makeLayer(type, 1024);
 
   const rebuild = () => {
-    const buckets: Record<BlockType, BlockCoord[]> = {
-      grass: [], wood: [], leaves: [], planks: [], crafting_table: [],
-    };
+    const buckets = Object.fromEntries(
+      BLOCK_TYPES.map((type) => [type, [] as BlockCoord[]]),
+    ) as Record<BlockType, BlockCoord[]>;
     for (const [id, type] of solid) {
       const [x, y, z] = id.split(",").map(Number) as BlockCoord;
       if (!exposed(x, y, z)) continue;
