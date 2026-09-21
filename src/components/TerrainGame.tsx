@@ -8,6 +8,7 @@ import InventoryPanel from "./InventoryPanel";
 import MobileControls from "./MobileControls";
 import { makeHandItem } from "./handItems";
 import { createRemotePlayers } from "./remotePlayers";
+import { startBackgroundTicker } from "@/lib/backgroundTicker";
 import { connectWorld, touchWorld, type RemotePose, type WorldSession } from "@/lib/multiplayer";
 import {
   BLOCK_LABEL,
@@ -91,8 +92,8 @@ export default function TerrainGame({
   const usernameRef = useRef(username);
   const disabledRef = useRef(false);
   const setNameTagRef = useRef<(name: string) => void>(() => {});
-  const [loaded, setLoaded] = useState(false);
-  const [moving, setMoving] = useState(false);
+  const [, setLoaded] = useState(false);
+  const [, setMoving] = useState(false);
   const [playerCount, setPlayerCount] = useState(1);
   const [health, setHealth] = useState(MAX_HEALTH);
   const healthRef = useRef(MAX_HEALTH);
@@ -106,7 +107,7 @@ export default function TerrainGame({
     if (amount <= 0) return;
     setHealthValue(healthRef.current - amount);
   };
-  const [attackLabel, setAttackLabel] = useState<string | null>(null);
+  const [, setAttackLabel] = useState<string | null>(null);
   const [inventory, setInventory] = useState<Slot[]>(() =>
     Array.from({ length: INVENTORY_SIZE }, () => null),
   );
@@ -452,7 +453,11 @@ export default function TerrainGame({
       edits: online?.edits ?? [],
       onEdit: (edit) => link?.sendEdit(edit),
     });
-    const remotePlayers = createRemotePlayers(scene);
+    const remotePlayers = createRemotePlayers(scene, {
+      // Other players carry the same block or tool models in their hand.
+      makeItem: (type) =>
+        isPlaceable(type) ? world.makeBlockMesh(0.19, type) : makeHandItem(type),
+    });
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     if (online?.online && online.worldId) {
       const worldId = online.worldId;
@@ -462,6 +467,7 @@ export default function TerrainGame({
           remotePlayers.setPlayers(players);
           setPlayerCount(players.length + 1);
         },
+        onHit: (amount) => damagePlayer(amount),
       });
       // Keeps the world alive while anyone is playing; after 30 idle minutes
       // the next player to join gets a brand new terrain.
@@ -564,6 +570,16 @@ export default function TerrainGame({
     let miningProgress = 0;
     let miningBlock: [number, number, number] | null = null;
     let attackBonus = 0;
+
+    // Damage dealt to another player, in half-hearts (2 units = 1 heart):
+    // punch/combo 0.5, kick 1, tool 1.5, sword 2 hearts.
+    const pvpAim = new THREE.Vector3();
+    const meleeDamage = (mode: AttackMode | null) => {
+      const item = invRef.current[selectedRef.current]?.type ?? null;
+      if (item && item.endsWith("_sword")) return 4;
+      if (item && item !== "stick" && !isPlaceable(item)) return 3;
+      return mode === "kick" ? 2 : 1;
+    };
 
     let windupPose: PoseMap | undefined;
     let strikePose: PoseMap | undefined;
@@ -916,6 +932,7 @@ export default function TerrainGame({
       chainedPunch = false;
       attackTime = ATTACK_DURATIONS[attackMode];
       pendingHits = attackMode === "combo" ? 2 : 1;
+      poseTimer = 0; // tell everyone else about the swing right away
       setAttackLabel(attackMode === "punch" ? "PUNCH" : attackMode === "combo" ? "COMBO" : "KICK");
     };
 
@@ -972,8 +989,10 @@ export default function TerrainGame({
     };
 
     let animationFrame = 0;
-    const animate = () => {
-      animationFrame = requestAnimationFrame(animate);
+    // The world keeps simulating while the tab is in the background (browsers
+    // stop animation frames there, which used to leave the player floating and
+    // silent for everyone else); only drawing is skipped.
+    const frame = (visible: boolean) => {
       const delta = Math.min(clock.getDelta(), 0.035);
       // Touch buttons queue a jump / place for the next frame.
       if (touchJumpRef.current) {
@@ -1140,7 +1159,18 @@ export default function TerrainGame({
         const hitPoint = attackMode === "combo" ? (pendingHits === 2 ? 0.3 : 0.74) : attackMode === "kick" ? 0.48 : chainedPunch ? 0.66 : 0.5;
         if (pendingHits > 0 && p >= hitPoint) {
           pendingHits -= 1;
-          attackBonus += 0.3;
+          let hitPlayer = false;
+          // PvP: whoever the crosshair is on takes the hit.
+          if (link) {
+            camera.getWorldDirection(pvpAim);
+            const targetId = remotePlayers.hitTest(camera.position, pvpAim, 4.2);
+            if (targetId) {
+              hitPlayer = true;
+              link.sendHit(targetId, meleeDamage(attackMode));
+            }
+          }
+          // A player absorbs the strike; do not also damage the block behind them.
+          if (!hitPlayer) attackBonus += 0.3;
         }
 
         if (attackTime === 0) {
@@ -1431,10 +1461,14 @@ export default function TerrainGame({
       nameSprite.visible = !firstPersonView;
 
       // --- multiplayer sync ---------------------------------------------------
-      remotePlayers.update(delta);
+      // Simulate gravity for remote avatars too. This keeps an inactive
+      // player's visible body grounded immediately after its support is mined,
+      // even if that browser has suspended its own rendering loop.
+      remotePlayers.update(delta, (x, z, y) => world.groundHeight(x, z, y));
       poseTimer -= delta;
       if (link && poseTimer <= 0) {
-        poseTimer = 0.1;
+        // Stay under the realtime 10 messages/second budget.
+        poseTimer = attackMode ? 0.11 : 0.15;
         link.sendPose({
           name: usernameRef.current?.trim() || "Player",
           x: character.position.x,
@@ -1442,6 +1476,9 @@ export default function TerrainGame({
           z: character.position.z,
           ry: character.rotation.y,
           moving: speed > 0,
+          attack: attackMode,
+          ap: attackMode ? 1 - attackTime / ATTACK_DURATIONS[attackMode] : 0,
+          item: invRef.current[selectedRef.current]?.type ?? null,
         });
       }
 
@@ -1450,9 +1487,16 @@ export default function TerrainGame({
         lastMovingState = nowMoving;
         setMoving(nowMoving);
       }
-      renderer.render(scene, camera);
+      if (visible) renderer.render(scene, camera);
+    };
+    const animate = () => {
+      animationFrame = requestAnimationFrame(animate);
+      if (!document.hidden) frame(true);
     };
     animate();
+    const stopBackgroundFrames = startBackgroundTicker(() => {
+      if (document.hidden) frame(false);
+    }, 50);
 
     const onResize = () => {
       if (!host) return;
@@ -1464,6 +1508,7 @@ export default function TerrainGame({
 
     return () => {
       cancelAnimationFrame(animationFrame);
+      stopBackgroundFrames();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -1498,15 +1543,8 @@ export default function TerrainGame({
         <div className="game-status" aria-live="polite">
           TOTAL PLAYERS: {playerCount}
         </div>
-        <div className="game-status" aria-live="polite">
-          <span className={loaded ? "status-light is-ready" : "status-light"} />
-          {loaded ? (attackLabel ?? (moving ? "MOVING" : "READY")) : "LOADING MODEL"}
-        </div>
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-end p-5 sm:p-7">
-        <div className="physics-badge"><span />SECONDARY MOTION</div>
-      </div>
 
       {invOpen ? (
         <InventoryPanel
