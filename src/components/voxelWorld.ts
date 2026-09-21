@@ -1,12 +1,13 @@
 import * as THREE from "three";
 
 // --- Minecraft-style voxel terrain ------------------------------------------
-// A single InstancedMesh holds every visible grass block. Columns get random
-// heights from layered value noise; blocks fully surrounded by neighbours are
-// culled. Attacks raycast the mesh and remove the hit block.
+// One InstancedMesh per block type holds every visible block. Columns get
+// random heights from layered value noise; blocks fully surrounded by
+// neighbours are culled. Attacks raycast the meshes and remove the hit block.
 
 const WORLD_RADIUS = 40; // blocks from centre on X/Z
 const MAX_HEIGHT = 10;
+const SCAN_HEIGHT = MAX_HEIGHT + 26; // terrain + tallest tree
 
 function hash2(x: number, z: number) {
   const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
@@ -36,7 +37,18 @@ function columnHeight(x: number, z: number) {
   return THREE.MathUtils.clamp(Math.round(h), 1, MAX_HEIGHT + 6);
 }
 
-function grassTexture(kind: "top" | "side" | "dirt") {
+type TextureKind =
+  | "grass_top"
+  | "grass_side"
+  | "dirt"
+  | "wood_top"
+  | "wood_side"
+  | "leaves"
+  | "planks"
+  | "table_top"
+  | "table_side";
+
+function blockTexture(kind: TextureKind) {
   const size = 32;
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -54,11 +66,11 @@ function grassTexture(kind: "top" | "side" | "dirt") {
     }
   };
 
-  if (kind === "top") {
+  if (kind === "grass_top") {
     paintNoise(0, size, [104, 158, 74], 46);
   } else if (kind === "dirt") {
     paintNoise(0, size, [128, 94, 62], 42);
-  } else {
+  } else if (kind === "grass_side") {
     paintNoise(0, size, [128, 94, 62], 42);
     paintNoise(0, 8, [104, 158, 74], 46);
     // ragged grass fringe over the dirt
@@ -67,6 +79,59 @@ function grassTexture(kind: "top" | "side" | "dirt") {
       ctx.fillStyle = `rgb(${96 + Math.floor(hash2(x, 7) * 24)},${150},${70})`;
       ctx.fillRect(x, 8, 1, depth - 8);
     }
+  } else if (kind === "wood_side") {
+    paintNoise(0, size, [104, 78, 48], 26);
+    // vertical bark grooves
+    for (let x = 0; x < size; x += 1) {
+      if (hash2(x * 5.3, 1.7) > 0.68) {
+        ctx.fillStyle = `rgba(56,40,24,${0.25 + hash2(x, 9) * 0.3})`;
+        ctx.fillRect(x, 0, 1, size);
+      }
+    }
+  } else if (kind === "wood_top") {
+    paintNoise(0, size, [156, 120, 76], 22);
+    // concentric rings
+    ctx.strokeStyle = "rgba(96,68,40,0.55)";
+    for (let r = 3; r < size / 2; r += 4) {
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  } else if (kind === "leaves") {
+    paintNoise(0, size, [72, 124, 56], 54);
+    // darker speckles + a few transparent-looking gaps
+    for (let i = 0; i < 90; i += 1) {
+      const x = Math.floor(hash2(i, 2.1) * size);
+      const y = Math.floor(hash2(i, 5.4) * size);
+      ctx.fillStyle = hash2(i, 7.7) > 0.5 ? "rgba(36,72,32,0.85)" : "rgba(122,168,86,0.7)";
+      ctx.fillRect(x, y, 2, 2);
+    }
+  } else if (kind === "planks") {
+    paintNoise(0, size, [162, 124, 76], 20);
+    ctx.fillStyle = "rgba(92,64,36,0.75)";
+    for (let y = 0; y < size; y += 8) ctx.fillRect(0, y, size, 1);
+    for (let y = 0; y < size; y += 8) {
+      const seam = Math.floor(hash2(y, 3.9) * size);
+      ctx.fillRect(seam, y, 1, 8);
+    }
+  } else if (kind === "table_top") {
+    paintNoise(0, size, [150, 112, 68], 18);
+    ctx.fillStyle = "rgba(76,52,30,0.8)";
+    ctx.fillRect(0, 0, size, 2);
+    ctx.fillRect(0, size - 2, size, 2);
+    ctx.fillRect(0, 0, 2, size);
+    ctx.fillRect(size - 2, 0, 2, size);
+    // 2x2 grid engraved on the surface
+    ctx.fillStyle = "rgba(58,40,22,0.85)";
+    ctx.fillRect(size / 2 - 1, 4, 2, size - 8);
+    ctx.fillRect(4, size / 2 - 1, size - 8, 2);
+  } else {
+    // table_side: planks with a tool strip near the top
+    paintNoise(0, size, [148, 110, 66], 20);
+    ctx.fillStyle = "rgba(84,58,32,0.8)";
+    ctx.fillRect(0, 10, size, 2);
+    ctx.fillStyle = "rgba(60,42,24,0.7)";
+    for (let x = 2; x < size; x += 6) ctx.fillRect(x, 2, 2, 7);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -78,24 +143,27 @@ function grassTexture(kind: "top" | "side" | "dirt") {
 
 export type BlockCoord = [number, number, number];
 
-export type BlockType = "grass";
+export type BlockType = "grass" | "wood" | "leaves" | "planks" | "crafting_table";
+
+export const BLOCK_TYPES: BlockType[] = ["grass", "wood", "leaves", "planks", "crafting_table"];
 
 export type VoxelWorld = {
-  mesh: THREE.InstancedMesh;
   groundHeight: (x: number, z: number) => number;
   breakBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => boolean;
   pickBlock: (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => BlockCoord | null;
+  blockTypeAt: (block: BlockCoord) => BlockType | null;
   placeBlock: (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
     reach: number,
     playerPosition: THREE.Vector3,
+    type: BlockType,
   ) => boolean;
   removeBlock: (block: BlockCoord) => void;
   showBreakProgress: (block: BlockCoord | null, progress: number) => void;
   highlightBlock: (block: BlockCoord | null) => void;
   cameraClearance: (target: THREE.Vector3, toCamera: THREE.Vector3) => number;
-
+  makeBlockMesh: (size: number, type?: BlockType) => THREE.Mesh;
   update: (
     delta: number,
     playerPosition?: THREE.Vector3,
@@ -137,13 +205,44 @@ function crackTexture(stage: number) {
 }
 
 export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
-  const solid = new Set<string>();
+  const solid = new Map<string, BlockType>();
   const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
   for (let x = -WORLD_RADIUS; x <= WORLD_RADIUS; x += 1) {
     for (let z = -WORLD_RADIUS; z <= WORLD_RADIUS; z += 1) {
       const top = columnHeight(x, z);
-      for (let y = 0; y < top; y += 1) solid.add(key(x, y, z));
+      for (let y = 0; y < top; y += 1) solid.set(key(x, y, z), "grass");
+    }
+  }
+
+  // --- trees ---------------------------------------------------------------
+  const trees: Array<[number, number]> = [];
+  for (let x = -WORLD_RADIUS + 3; x <= WORLD_RADIUS - 3; x += 1) {
+    for (let z = -WORLD_RADIUS + 3; z <= WORLD_RADIUS - 3; z += 1) {
+      if (hash2(x * 1.7 + 11.3, z * 2.3 + 7.1) < 0.978) continue;
+      if (Math.hypot(x, z) < 5) continue; // keep the spawn area clear
+      if (trees.some(([tx, tz]) => Math.abs(tx - x) < 5 && Math.abs(tz - z) < 5)) continue;
+      trees.push([x, z]);
+      const base = columnHeight(x, z);
+      const trunk = 4 + Math.floor(hash2(x * 3.1, z * 5.7) * 3);
+      for (let y = base; y < base + trunk; y += 1) solid.set(key(x, y, z), "wood");
+      const crown = base + trunk;
+      // leaf canopy: two wide layers, then a tapered cap
+      for (let dy = -2; dy <= 1; dy += 1) {
+        const radius = dy <= -1 ? 2 : dy === 0 ? 2 : 1;
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          for (let dz = -radius; dz <= radius; dz += 1) {
+            if (Math.abs(dx) === radius && Math.abs(dz) === radius && radius > 1) continue;
+            const ly = crown + dy;
+            const lx = x + dx;
+            const lz = z + dz;
+            if (solid.get(key(lx, ly, lz)) === "wood") continue;
+            if (solid.has(key(lx, ly, lz))) continue;
+            solid.set(key(lx, ly, lz), "leaves");
+          }
+        }
+      }
+      solid.set(key(x, crown + 2, z), "leaves");
     }
   }
 
@@ -157,55 +256,106 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     !isSolid(x, y, z - 1);
 
   const geometry = new THREE.BoxGeometry(1, 1, 1);
-  const top = new THREE.MeshStandardMaterial({ map: grassTexture("top"), roughness: 1 });
-  const side = new THREE.MeshStandardMaterial({ map: grassTexture("side"), roughness: 1 });
-  const dirt = new THREE.MeshStandardMaterial({ map: grassTexture("dirt"), roughness: 1 });
-  const materials = [side, side, top, dirt, side, side];
 
-  const maxInstances = solid.size;
-  const mesh = new THREE.InstancedMesh(geometry, materials, maxInstances);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.frustumCulled = false;
-  scene.add(mesh);
+  const texture = (kind: TextureKind) => blockTexture(kind);
+  const mat = (kind: TextureKind) =>
+    new THREE.MeshStandardMaterial({ map: texture(kind), roughness: 1 });
 
-  const instanceBlocks: Array<[number, number, number]> = [];
+  const grassTop = mat("grass_top");
+  const grassSide = mat("grass_side");
+  const dirt = mat("dirt");
+  const woodTop = mat("wood_top");
+  const woodSide = mat("wood_side");
+  const leaves = mat("leaves");
+  const planks = mat("planks");
+  const tableTop = mat("table_top");
+  const tableSide = mat("table_side");
+
+  const allMaterials = [grassTop, grassSide, dirt, woodTop, woodSide, leaves, planks, tableTop, tableSide];
+
+  // material order: +x, -x, +y, -y, +z, -z
+  const materialsByType: Record<BlockType, THREE.Material[]> = {
+    grass: [grassSide, grassSide, grassTop, dirt, grassSide, grassSide],
+    wood: [woodSide, woodSide, woodTop, woodTop, woodSide, woodSide],
+    leaves: [leaves, leaves, leaves, leaves, leaves, leaves],
+    planks: [planks, planks, planks, planks, planks, planks],
+    crafting_table: [tableSide, tableSide, tableTop, planks, tableSide, tableSide],
+  };
+
+  type Layer = { mesh: THREE.InstancedMesh; blocks: BlockCoord[]; capacity: number };
+  const layers = {} as Record<BlockType, Layer>;
   const matrix = new THREE.Matrix4();
 
+  const makeLayer = (type: BlockType, capacity: number): Layer => {
+    const mesh = new THREE.InstancedMesh(geometry, materialsByType[type], capacity);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    scene.add(mesh);
+    return { mesh, blocks: [], capacity };
+  };
+
+  for (const type of BLOCK_TYPES) layers[type] = makeLayer(type, 1024);
+
   const rebuild = () => {
-    instanceBlocks.length = 0;
-    for (const id of solid) {
-      const [x, y, z] = id.split(",").map(Number) as [number, number, number];
+    const buckets: Record<BlockType, BlockCoord[]> = {
+      grass: [], wood: [], leaves: [], planks: [], crafting_table: [],
+    };
+    for (const [id, type] of solid) {
+      const [x, y, z] = id.split(",").map(Number) as BlockCoord;
       if (!exposed(x, y, z)) continue;
-      instanceBlocks.push([x, y, z]);
+      buckets[type].push([x, y, z]);
     }
-    for (let index = 0; index < instanceBlocks.length; index += 1) {
-      const [x, y, z] = instanceBlocks[index]!;
-      matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5);
-      mesh.setMatrixAt(index, matrix);
+    for (const type of BLOCK_TYPES) {
+      const list = buckets[type];
+      let layer = layers[type];
+      if (list.length > layer.capacity) {
+        scene.remove(layer.mesh);
+        layer.mesh.dispose();
+        layer = makeLayer(type, Math.max(1024, list.length * 2));
+        layers[type] = layer;
+      }
+      layer.blocks = list;
+      for (let index = 0; index < list.length; index += 1) {
+        const [x, y, z] = list[index]!;
+        matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5);
+        layer.mesh.setMatrixAt(index, matrix);
+      }
+      layer.mesh.count = list.length;
+      layer.mesh.instanceMatrix.needsUpdate = true;
+      layer.mesh.computeBoundingSphere();
     }
-    mesh.count = instanceBlocks.length;
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingSphere();
   };
   rebuild();
+
+  const pickMeshes = () => BLOCK_TYPES.map((type) => layers[type].mesh);
+
+  // A single textured block matching a world material (held item, previews).
+  const makeBlockMesh = (size: number, type: BlockType = "grass") => {
+    const block = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), materialsByType[type]);
+    block.castShadow = true;
+    return block;
+  };
 
   const groundHeight = (x: number, z: number) => {
     const bx = Math.floor(x);
     const bz = Math.floor(z);
-    for (let y = MAX_HEIGHT + 8; y >= 0; y -= 1) {
+    for (let y = SCAN_HEIGHT; y >= 0; y -= 1) {
       if (isSolid(bx, y, bz)) return y + 1;
     }
     return 0;
   };
 
+  const blockTypeAt = (block: BlockCoord) => solid.get(key(block[0], block[1], block[2])) ?? null;
+
   // --- dropped block items (collectable pickups) -----------------------------
   const dropGeometry = new THREE.BoxGeometry(0.32, 0.32, 0.32);
-  type Drop = { mesh: THREE.Mesh; velocity: THREE.Vector3; bob: number };
+  type Drop = { mesh: THREE.Mesh; velocity: THREE.Vector3; bob: number; type: BlockType };
   const drops: Drop[] = [];
 
-  const spawnDrop = (block: BlockCoord) => {
-    const piece = new THREE.Mesh(dropGeometry, materials);
+  const spawnDrop = (block: BlockCoord, type: BlockType) => {
+    const piece = new THREE.Mesh(dropGeometry, materialsByType[type]);
     piece.castShadow = true;
     piece.position.set(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5);
     piece.rotation.y = Math.random() * Math.PI;
@@ -214,6 +364,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
       mesh: piece,
       velocity: new THREE.Vector3((Math.random() - 0.5) * 0.9, 2.1, (Math.random() - 0.5) * 0.9),
       bob: Math.random() * Math.PI * 2,
+      type,
     });
   };
 
@@ -221,9 +372,10 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   const debrisGeometry = new THREE.BoxGeometry(0.16, 0.16, 0.16);
   const debris: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; life: number }> = [];
 
-  const spawnDebris = (center: THREE.Vector3) => {
+  const spawnDebris = (center: THREE.Vector3, type: BlockType) => {
+    const faces = materialsByType[type];
     for (let index = 0; index < 8; index += 1) {
-      const piece = new THREE.Mesh(debrisGeometry, index % 2 === 0 ? top : dirt);
+      const piece = new THREE.Mesh(debrisGeometry, faces[index % faces.length]!);
       piece.position.copy(center);
       piece.castShadow = false;
       scene.add(piece);
@@ -261,22 +413,30 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
   scene.add(outline);
 
   const removeBlock = (block: BlockCoord) => {
-    if (!isSolid(block[0], block[1], block[2])) return;
+    const type = blockTypeAt(block);
+    if (!type) return;
     solid.delete(key(block[0], block[1], block[2]));
-    spawnDebris(new THREE.Vector3(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5));
-    spawnDrop(block);
+    spawnDebris(new THREE.Vector3(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5), type);
+    spawnDrop(block, type);
     rebuild();
     crackMesh.visible = false;
     outline.visible = false;
   };
 
-  const pickBlock = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number): BlockCoord | null => {
+  const rayHit = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) => {
     raycaster.set(origin, direction.clone().normalize());
     raycaster.far = reach;
-    const hit = raycaster.intersectObject(mesh, false)[0];
+    const hits = raycaster.intersectObjects(pickMeshes(), false);
+    const hit = hits[0];
     if (!hit || hit.instanceId === undefined) return null;
-    return instanceBlocks[hit.instanceId] ?? null;
+    const layer = BLOCK_TYPES.map((type) => layers[type]).find((entry) => entry.mesh === hit.object);
+    const block = layer?.blocks[hit.instanceId];
+    if (!block) return null;
+    return { block, normal: hit.face?.normal ?? null };
   };
+
+  const pickBlock = (origin: THREE.Vector3, direction: THREE.Vector3, reach: number) =>
+    rayHit(origin, direction, reach)?.block ?? null;
 
   // Place a block against the face the ray hits (the empty cell in front of it).
   const placeBlock = (
@@ -284,14 +444,11 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     direction: THREE.Vector3,
     reach: number,
     playerPosition: THREE.Vector3,
+    type: BlockType,
   ) => {
-    raycaster.set(origin, direction.clone().normalize());
-    raycaster.far = reach;
-    const hit = raycaster.intersectObject(mesh, false)[0];
-    if (!hit || hit.instanceId === undefined || !hit.face) return false;
-    const block = instanceBlocks[hit.instanceId];
-    if (!block) return false;
-    const normal = hit.face.normal;
+    const hit = rayHit(origin, direction, reach);
+    if (!hit || !hit.normal) return false;
+    const { block, normal } = hit;
     const target: BlockCoord = [
       block[0] + Math.round(normal.x),
       block[1] + Math.round(normal.y),
@@ -305,7 +462,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     if (target[0] === px && target[2] === pz && (target[1] === feet || target[1] === feet + 1)) {
       return false;
     }
-    solid.add(key(target[0], target[1], target[2]));
+    solid.set(key(target[0], target[1], target[2]), type);
     rebuild();
     return true;
   };
@@ -354,7 +511,7 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
         if (distance < 0.55) {
           scene.remove(drop.mesh);
           drops.splice(index, 1);
-          onCollect?.("grass");
+          onCollect?.(drop.type);
           continue;
         }
         if (distance < 1.9) {
@@ -399,17 +556,20 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     for (const drop of drops) scene.remove(drop.mesh);
     drops.length = 0;
     dropGeometry.dispose();
-    scene.remove(mesh);
+    for (const type of BLOCK_TYPES) {
+      scene.remove(layers[type].mesh);
+      layers[type].mesh.dispose();
+    }
     scene.remove(crackMesh);
     scene.remove(outline);
     crackMesh.geometry.dispose();
     crackMaterial.dispose();
-    crackTextures.forEach((texture) => texture.dispose());
+    crackTextures.forEach((entry) => entry.dispose());
     outline.geometry.dispose();
     (outline.material as THREE.Material).dispose();
     geometry.dispose();
     debrisGeometry.dispose();
-    for (const material of [top, side, dirt]) {
+    for (const material of allMaterials) {
       material.map?.dispose();
       material.dispose();
     }
@@ -421,23 +581,23 @@ export function createVoxelWorld(scene: THREE.Scene): VoxelWorld {
     if (length < 0.001) return 1;
     raycaster.set(target, toCamera.clone().normalize());
     raycaster.far = length;
-    const hit = raycaster.intersectObject(mesh, false)[0];
+    const hit = raycaster.intersectObjects(pickMeshes(), false)[0];
     if (!hit) return 1;
     return Math.max(0, (hit.distance - 0.25) / length);
   };
 
   return {
-    mesh,
     groundHeight,
     breakBlock,
     pickBlock,
+    blockTypeAt,
     placeBlock,
     removeBlock,
     showBreakProgress,
     highlightBlock,
     cameraClearance,
+    makeBlockMesh,
     update,
     dispose,
   };
-
 }
