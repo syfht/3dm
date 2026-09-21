@@ -17,7 +17,7 @@ export const BLOCK_LABEL: Record<BlockType, string> = {
 // Seconds of continuous mining needed to break each block.
 export const BREAK_TIMES: Record<BlockType, number> = {
   grass: 0.95,
-  wood: 1.6,
+  wood: 3.6,
   leaves: 0.3,
   planks: 1.2,
   crafting_table: 1.4,
