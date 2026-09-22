@@ -41,9 +41,9 @@ function addHead(group: THREE.Group, kind: ToolKind, color: number, top: number)
     parts.push(bar, leftTip, rightTip);
   } else if (kind === "axe") {
     const blade = box(0.14, 0.17, 0.05, color);
-    blade.position.set(0.08, top - 0.03, 0);
+    blade.position.set(-0.08, top - 0.03, 0);
     const edge = box(0.05, 0.21, 0.05, color);
-    edge.position.set(0.16, top - 0.03, 0);
+    edge.position.set(-0.16, top - 0.03, 0);
     parts.push(blade, edge);
   } else if (kind === "shovel") {
     const scoop = box(0.14, 0.14, 0.05, color);
@@ -66,6 +66,11 @@ export function makeHandItem(type: ItemType): THREE.Group | null {
 
   if (type === "stick") {
     group.add(handle(0.34));
+  } else if (type === "coal") {
+    const lump = box(0.18, 0.14, 0.12, 0x292b2f);
+    lump.position.y = 0.08;
+    lump.rotation.set(0.18, 0.25, -0.12);
+    group.add(lump);
   } else {
     const [material, kind] = type.split("_") as [ToolMaterial, ToolKind];
     const length = kind === "sword" ? 0.2 : 0.46;

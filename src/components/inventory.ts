@@ -5,7 +5,7 @@ export type ToolKind = "sword" | "pickaxe" | "axe" | "shovel" | "hoe";
 export type ToolMaterial = "wooden" | "stone";
 export type ToolType = `${ToolMaterial}_${ToolKind}`;
 
-export type ItemType = BlockType | "stick" | ToolType;
+export type ItemType = BlockType | "stick" | "coal" | ToolType;
 
 export type Slot = { type: ItemType; count: number } | null;
 
@@ -17,7 +17,7 @@ const PLACEABLE = new Set<string>(BLOCK_TYPES);
 export const isPlaceable = (type: ItemType): type is BlockType => PLACEABLE.has(type);
 
 // Tools never stack in Minecraft.
-export const maxStack = (type: ItemType) => (isPlaceable(type) || type === "stick" ? STACK_LIMIT : 1);
+export const maxStack = (type: ItemType) => (isPlaceable(type) || type === "stick" || type === "coal" ? STACK_LIMIT : 1);
 
 export const BLOCK_LABEL: Record<ItemType, string> = {
   grass: "Grass Block",
@@ -29,7 +29,16 @@ export const BLOCK_LABEL: Record<ItemType, string> = {
   chest: "Chest",
   furnace: "Furnace",
   ladder: "Ladder",
+  wooden_staircase: "Wooden Staircase",
+  wooden_staircase_n: "Wooden Staircase",
+  wooden_staircase_s: "Wooden Staircase",
+  wooden_staircase_e: "Wooden Staircase",
+  wooden_staircase_w: "Wooden Staircase",
+  slab: "Wooden Slab",
+  coal_ore: "Coal Ore",
+  torch: "Torch",
   stick: "Stick",
+  coal: "Coal",
   wooden_sword: "Wooden Sword",
   wooden_pickaxe: "Wooden Pickaxe",
   wooden_axe: "Wooden Axe",
@@ -53,12 +62,20 @@ export const BREAK_TIMES: Record<BlockType, number> = {
   chest: 1.6,
   furnace: 6.5,
   ladder: 0.4,
+  wooden_staircase: 1.2,
+  wooden_staircase_n: 1.2,
+  wooden_staircase_s: 1.2,
+  wooden_staircase_e: 1.2,
+  wooden_staircase_w: 1.2,
+  slab: 0.8,
+  coal_ore: 7.5,
+  torch: 0.2,
 };
 
 // Which tool speeds up which block, and by how much.
 const TOOL_TARGETS: Record<ToolKind, BlockType[]> = {
-  pickaxe: ["stone", "furnace"],
-  axe: ["wood", "planks", "crafting_table", "chest", "ladder"],
+  pickaxe: ["stone", "coal_ore", "furnace"],
+  axe: ["wood", "planks", "crafting_table", "chest", "ladder", "wooden_staircase", "wooden_staircase_n", "wooden_staircase_s", "wooden_staircase_e", "wooden_staircase_w", "slab"],
   shovel: ["grass"],
   sword: ["leaves"],
   hoe: [],
@@ -99,6 +116,12 @@ const plainRecipes: Array<{ rows: string[]; result: { type: ItemType; count: num
   { rows: ["CCC", "C C", "CCC"], result: { type: "furnace", count: 1 } },
   // 7 sticks -> 3 ladders
   { rows: ["S S", "SSS", "S S"], result: { type: "ladder", count: 3 } },
+  // Six planks in steps -> four wooden staircases.
+  { rows: ["P  ", "PP ", "PPP"], result: { type: "wooden_staircase", count: 4 } },
+  // Three planks in a row -> six wooden slabs.
+  { rows: ["PPP"], result: { type: "slab", count: 6 } },
+  // Smelted coal above a stick -> four torches.
+  { rows: ["O", "S"], result: { type: "torch", count: 4 } },
 ];
 
 // Trim empty rows/columns so a recipe can sit anywhere in the grid.
@@ -146,6 +169,8 @@ function matches(rows: Array<Array<Slot>>, pattern: string[], material: ItemType
               ? "planks"
               : symbol === "C"
                 ? "stone"
+              : symbol === "O"
+                ? "coal"
                 : material;
       if (want === null) {
         if (slot) return false;

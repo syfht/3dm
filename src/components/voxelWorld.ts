@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+
 
 // --- Minecraft-style voxel terrain ------------------------------------------
 // One InstancedMesh per block type holds every visible block. Columns get
@@ -29,6 +31,8 @@ type TextureKind =
   | "chest_front"
   | "furnace_side"
   | "furnace_front"
+  | "coal_ore"
+  | "torch"
   | "ladder";
 
 function blockTexture(kind: TextureKind) {
@@ -61,6 +65,15 @@ function blockTexture(kind: TextureKind) {
       const y = Math.floor(hash2(i * 2.7, 8.6) * size);
       const s = 2 + Math.floor(hash2(i, 1.1) * 3);
       ctx.fillStyle = hash2(i, 6.3) > 0.5 ? "rgba(92,92,96,0.55)" : "rgba(160,160,164,0.45)";
+      ctx.fillRect(x, y, s, s);
+    }
+  } else if (kind === "coal_ore") {
+    paintNoise(0, size, [118, 118, 121], 28);
+    for (let i = 0; i < 28; i += 1) {
+      const x = Math.floor(hash2(i * 4.1, 12.3) * (size - 5));
+      const y = Math.floor(hash2(i * 2.9, 22.7) * (size - 5));
+      const s = 2 + Math.floor(hash2(i, 17.1) * 4);
+      ctx.fillStyle = hash2(i, 2.2) > 0.3 ? "rgb(31,32,34)" : "rgb(55,56,59)";
       ctx.fillRect(x, y, s, s);
     }
   } else if (kind === "chest_top") {
@@ -112,6 +125,14 @@ function blockTexture(kind: TextureKind) {
     ctx.fillRect(size - 8, 0, 4, size);
     ctx.fillStyle = rungDark;
     for (let y = 4; y < size; y += 8) ctx.fillRect(8, y, size - 16, 3);
+  } else if (kind === "torch") {
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = "rgb(128,78,35)";
+    ctx.fillRect(13, 9, 6, 23);
+    ctx.fillStyle = "rgb(255,207,62)";
+    ctx.fillRect(10, 2, 12, 10);
+    ctx.fillStyle = "rgb(239,91,27)";
+    ctx.fillRect(13, 0, 6, 7);
   } else if (kind === "grass_side") {
     paintNoise(0, size, [128, 94, 62], 42);
     paintNoise(0, 8, [104, 158, 74], 46);
@@ -194,7 +215,15 @@ export type BlockType =
   | "crafting_table"
   | "chest"
   | "furnace"
-  | "ladder";
+  | "ladder"
+  | "wooden_staircase"
+  | "wooden_staircase_n"
+  | "wooden_staircase_s"
+  | "wooden_staircase_e"
+  | "wooden_staircase_w"
+  | "slab"
+  | "coal_ore"
+  | "torch";
 
 export const BLOCK_TYPES: BlockType[] = [
   "grass",
@@ -206,10 +235,20 @@ export const BLOCK_TYPES: BlockType[] = [
   "chest",
   "furnace",
   "ladder",
+  "wooden_staircase",
+  "wooden_staircase_n",
+  "wooden_staircase_s",
+  "wooden_staircase_e",
+  "wooden_staircase_w",
+  "slab",
+  "coal_ore",
+  "torch",
 ];
 
 /** Blocks you can walk through and climb instead of stand on. */
 export const CLIMBABLE: BlockType[] = ["ladder"];
+const STAIR_TYPES: BlockType[] = ["wooden_staircase", "wooden_staircase_n", "wooden_staircase_s", "wooden_staircase_e", "wooden_staircase_w"];
+const NON_OCCLUDING: BlockType[] = ["ladder", "torch", "slab", ...STAIR_TYPES];
 
 // A single block change made by a player (block === null means it was mined).
 export type WorldEdit = { x: number; y: number; z: number; block: BlockType | null };
@@ -304,15 +343,48 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   }
 
   const isSolid = (x: number, y: number, z: number) => solid.has(key(x, y, z));
+  // Ladders are thin panels, so they never hide the face of the block behind.
+  const occludes = (x: number, y: number, z: number) => {
+    const type = solid.get(key(x, y, z));
+    return Boolean(type && !NON_OCCLUDING.includes(type));
+  };
   const exposed = (x: number, y: number, z: number) =>
-    !isSolid(x + 1, y, z) ||
-    !isSolid(x - 1, y, z) ||
-    !isSolid(x, y + 1, z) ||
-    !isSolid(x, y - 1, z) ||
-    !isSolid(x, y, z + 1) ||
-    !isSolid(x, y, z - 1);
+    !occludes(x + 1, y, z) ||
+    !occludes(x - 1, y, z) ||
+    !occludes(x, y + 1, z) ||
+    !occludes(x, y - 1, z) ||
+    !occludes(x, y, z + 1) ||
+    !occludes(x, y, z - 1);
+
+  // Which wall a ladder hangs on: the first solid horizontal neighbour.
+  // Derived from the world so every player sees the same orientation.
+  const LADDER_SIDES: BlockCoord[] = [
+    [0, 0, -1],
+    [0, 0, 1],
+    [-1, 0, 0],
+    [1, 0, 0],
+  ];
+  const ladderFacing = (x: number, y: number, z: number): BlockCoord => {
+    for (const side of LADDER_SIDES) {
+      if (occludes(x + side[0], y, z + side[2])) return side;
+    }
+    // No wall (the block it hung on was mined): keep it flat on the -Z side.
+    return [0, 0, -1];
+  };
 
   const geometry = new THREE.BoxGeometry(1, 1, 1);
+  // A ladder is a thin panel pressed against the block it was placed on.
+  const ladderGeometry = new THREE.BoxGeometry(0.86, 1, 0.1);
+  const slabGeometry = new THREE.BoxGeometry(1, 0.5, 1);
+  // Built from two boxes instead of an extruded profile so every face keeps
+  // clean box UVs and outward normals (the extrusion shaded one corner dark).
+  const stairBottom = new THREE.BoxGeometry(1, 0.5, 1).translate(0, -0.25, 0);
+  const stairTop = new THREE.BoxGeometry(0.5, 0.5, 1).translate(0.25, 0.25, 0);
+  const staircaseGeometry = mergeGeometries([stairBottom, stairTop], true)!;
+  stairBottom.dispose();
+  stairTop.dispose();
+
+  const torchGeometry = new THREE.BoxGeometry(0.13, 0.62, 0.13);
 
   const texture = (kind: TextureKind) => blockTexture(kind);
   const mat = (kind: TextureKind) =>
@@ -333,6 +405,15 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   const chestFront = mat("chest_front");
   const furnaceSide = mat("furnace_side");
   const furnaceFront = mat("furnace_front");
+  const coalOre = mat("coal_ore");
+  const torch = new THREE.MeshStandardMaterial({
+    map: blockTexture("torch"),
+    roughness: 0.8,
+    emissive: new THREE.Color(0xff8a24),
+    emissiveIntensity: 1.4,
+    transparent: true,
+    alphaTest: 0.25,
+  });
   // Ladders are see-through between their rungs and visible from both sides.
   const ladder = new THREE.MeshStandardMaterial({
     map: blockTexture("ladder"),
@@ -344,7 +425,7 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
 
   const allMaterials = [
     grassTop, grassSide, dirt, woodTop, woodSide, leaves, planks, tableTop, tableSide,
-    stone, chestTop, chestSide, chestFront, furnaceSide, furnaceFront, ladder,
+    stone, chestTop, chestSide, chestFront, furnaceSide, furnaceFront, coalOre, torch, ladder,
   ];
 
   // material order: +x, -x, +y, -y, +z, -z
@@ -358,6 +439,14 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     chest: [chestSide, chestSide, chestTop, chestTop, chestFront, chestSide],
     furnace: [furnaceSide, furnaceSide, stone, stone, furnaceFront, furnaceSide],
     ladder: [ladder, ladder, ladder, ladder, ladder, ladder],
+    wooden_staircase: [planks, planks, planks, planks, planks, planks],
+    wooden_staircase_n: [planks, planks, planks, planks, planks, planks],
+    wooden_staircase_s: [planks, planks, planks, planks, planks, planks],
+    wooden_staircase_e: [planks, planks, planks, planks, planks, planks],
+    wooden_staircase_w: [planks, planks, planks, planks, planks, planks],
+    slab: [planks, planks, planks, planks, planks, planks],
+    coal_ore: [coalOre, coalOre, coalOre, coalOre, coalOre, coalOre],
+    torch: [torch, torch, torch, torch, torch, torch],
   };
 
   type Layer = { mesh: THREE.InstancedMesh; blocks: BlockCoord[]; capacity: number };
@@ -365,8 +454,17 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   const matrix = new THREE.Matrix4();
 
   const makeLayer = (type: BlockType, capacity: number): Layer => {
-    const mesh = new THREE.InstancedMesh(geometry, materialsByType[type], capacity);
-    mesh.castShadow = true;
+    const shape = type === "ladder"
+      ? ladderGeometry
+      : type === "slab"
+        ? slabGeometry
+        : STAIR_TYPES.includes(type)
+          ? staircaseGeometry
+          : type === "torch"
+            ? torchGeometry
+            : geometry;
+    const mesh = new THREE.InstancedMesh(shape, materialsByType[type], capacity);
+    mesh.castShadow = type !== "ladder" && type !== "torch";
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
     mesh.count = 0;
@@ -375,6 +473,11 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
   };
 
   for (const type of BLOCK_TYPES) layers[type] = makeLayer(type, 1024);
+
+  const quaternion = new THREE.Quaternion();
+  const scaleOne = new THREE.Vector3(1, 1, 1);
+  const instancePosition = new THREE.Vector3();
+  const torchLights = new Map<string, THREE.PointLight>();
 
   const rebuild = () => {
     const buckets = Object.fromEntries(
@@ -397,12 +500,47 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
       layer.blocks = list;
       for (let index = 0; index < list.length; index += 1) {
         const [x, y, z] = list[index]!;
-        matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5);
+        if (type === "ladder") {
+          // Hang the panel flat against the wall it was placed on.
+          const [dx, , dz] = ladderFacing(x, y, z);
+          instancePosition.set(x + 0.5 + dx * 0.44, y + 0.5, z + 0.5 + dz * 0.44);
+          quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(dx, dz));
+          matrix.compose(instancePosition, quaternion, scaleOne);
+        } else if (STAIR_TYPES.includes(type)) {
+          const angle = type === "wooden_staircase_n" ? Math.PI / 2
+            : type === "wooden_staircase_s" ? -Math.PI / 2
+              : type === "wooden_staircase_w" ? Math.PI
+                : 0;
+          instancePosition.set(x + 0.5, y + 0.5, z + 0.5);
+          quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+          matrix.compose(instancePosition, quaternion, scaleOne);
+        } else if (type === "slab") {
+          matrix.makeTranslation(x + 0.5, y + 0.25, z + 0.5);
+        } else if (type === "torch") {
+          matrix.makeTranslation(x + 0.5, y + 0.32, z + 0.5);
+        } else {
+          matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5);
+        }
         layer.mesh.setMatrixAt(index, matrix);
       }
       layer.mesh.count = list.length;
       layer.mesh.instanceMatrix.needsUpdate = true;
       layer.mesh.computeBoundingSphere();
+    }
+    const activeTorches = new Set(buckets.torch.map(([x, y, z]) => key(x, y, z)));
+    for (const [id, light] of torchLights) {
+      if (activeTorches.has(id)) continue;
+      scene.remove(light);
+      light.dispose();
+      torchLights.delete(id);
+    }
+    for (const [x, y, z] of buckets.torch) {
+      const id = key(x, y, z);
+      if (torchLights.has(id)) continue;
+      const light = new THREE.PointLight(0xffa23d, 7, 8, 1.7);
+      light.position.set(x + 0.5, y + 0.72, z + 0.5);
+      scene.add(light);
+      torchLights.set(id, light);
     }
   };
   rebuild();
@@ -411,7 +549,12 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
 
   // A single textured block matching a world material (held item, previews).
   const makeBlockMesh = (size: number, type: BlockType = "grass") => {
-    const block = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), materialsByType[type]);
+    const previewGeometry = type === "slab"
+      ? new THREE.BoxGeometry(size, size * 0.5, size)
+      : type === "torch"
+        ? new THREE.BoxGeometry(size * 0.2, size, size * 0.2)
+        : new THREE.BoxGeometry(size, size, size);
+    const block = new THREE.Mesh(previewGeometry, materialsByType[type]);
     block.castShadow = true;
     return block;
   };
@@ -425,7 +568,19 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     const bz = Math.floor(z);
     for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
       const type = solid.get(key(bx, y, bz));
-      if (type && !CLIMBABLE.includes(type)) return y + 1;
+      if (type && !CLIMBABLE.includes(type) && type !== "torch") {
+        if (type === "slab") return y + 0.5;
+        if (STAIR_TYPES.includes(type)) {
+          const localX = x - Math.floor(x);
+          const localZ = z - Math.floor(z);
+          const highHalf = type === "wooden_staircase_n" ? localZ < 0.5
+            : type === "wooden_staircase_s" ? localZ >= 0.5
+              : type === "wooden_staircase_w" ? localX < 0.5
+                : localX >= 0.5;
+          return y + (highHalf ? 1 : 0.5);
+        }
+        return y + 1;
+      }
     }
     return 0;
   };
@@ -458,7 +613,9 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     const bz = Math.floor(z);
     for (let y = Math.min(SCAN_HEIGHT, Math.ceil(fromY)); y >= 0; y -= 1) {
       const type = solid.get(key(bx, y, bz));
-      if (type && type !== "leaves" && !CLIMBABLE.includes(type)) return y + 1;
+      if (type && type !== "leaves" && type !== "torch" && !CLIMBABLE.includes(type)) {
+        return y + (type === "slab" ? 0.5 : 1);
+      }
     }
     return 0;
   };
@@ -562,7 +719,7 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     if (!type) return;
     solid.delete(key(block[0], block[1], block[2]));
     spawnDebris(new THREE.Vector3(block[0] + 0.5, block[1] + 0.5, block[2] + 0.5), type);
-    spawnDrop(block, type);
+    spawnDrop(block, STAIR_TYPES.includes(type) ? "wooden_staircase" : type);
     rebuild();
     crackMesh.visible = false;
     outline.visible = false;
@@ -616,16 +773,33 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
       block[2] + Math.round(normal.z),
     ];
     if (target[1] < 0 || isSolid(target[0], target[1], target[2])) return false;
+    // A ladder needs a wall to hang on.
+    if (type === "ladder") {
+      const hasWall = LADDER_SIDES.some((side) =>
+        occludes(target[0] + side[0], target[1], target[2] + side[2]),
+      );
+      if (!hasWall) return false;
+    }
+    // Torches need a solid floor and occupy no player collision volume.
+    if (type === "torch" && !occludes(target[0], target[1] - 1, target[2])) return false;
     // Never seal the player inside a block.
     const px = Math.floor(playerPosition.x);
     const pz = Math.floor(playerPosition.z);
     const feet = Math.floor(playerPosition.y + 0.05);
-    if (target[0] === px && target[2] === pz && (target[1] === feet || target[1] === feet + 1)) {
+    if (type !== "torch" && target[0] === px && target[2] === pz && (target[1] === feet || target[1] === feet + 1)) {
       return false;
     }
-    solid.set(key(target[0], target[1], target[2]), type);
+    let placedType = type;
+    if (type === "wooden_staircase") {
+      const dx = target[0] + 0.5 - playerPosition.x;
+      const dz = target[2] + 0.5 - playerPosition.z;
+      placedType = Math.abs(dx) >= Math.abs(dz)
+        ? (dx >= 0 ? "wooden_staircase_e" : "wooden_staircase_w")
+        : (dz >= 0 ? "wooden_staircase_s" : "wooden_staircase_n");
+    }
+    solid.set(key(target[0], target[1], target[2]), placedType);
     rebuild();
-    options.onEdit?.({ x: target[0], y: target[1], z: target[2], block: type });
+    options.onEdit?.({ x: target[0], y: target[1], z: target[2], block: placedType });
     return true;
   };
 
@@ -731,7 +905,16 @@ export function createVoxelWorld(scene: THREE.Scene, options: WorldOptions = {})
     outline.geometry.dispose();
     (outline.material as THREE.Material).dispose();
     geometry.dispose();
+    ladderGeometry.dispose();
+    slabGeometry.dispose();
+    staircaseGeometry.dispose();
+    torchGeometry.dispose();
     debrisGeometry.dispose();
+    for (const light of torchLights.values()) {
+      scene.remove(light);
+      light.dispose();
+    }
+    torchLights.clear();
     for (const material of allMaterials) {
       material.map?.dispose();
       material.dispose();

@@ -85,7 +85,7 @@ export default function MobileControls({
           <button
             type="button"
             className="touch-btn is-craft"
-            aria-label="Open crafting table"
+            aria-label="Interact"
             onPointerDown={(event) => {
               event.preventDefault();
               onOpenCrafting();

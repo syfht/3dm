@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { MODEL_URL, createModelLoader } from "@/assets/model";
 import { createVoxelWorld, type BlockType } from "./voxelWorld";
 import InventoryPanel from "./InventoryPanel";
+import FurnacePanel, { type FurnaceState } from "./FurnacePanel";
 import MobileControls from "./MobileControls";
 import { makeHandItem } from "./handItems";
 import { createRemotePlayers } from "./remotePlayers";
@@ -153,11 +154,18 @@ export default function TerrainGame({
   const chestKeyRef = useRef<string | null>(null);
   const chestStoreRef = useRef(new Map<string, Slot[]>());
 
+  // Furnace contents stay with each placed furnace for this game session.
+  const [furnaceOpen, setFurnaceOpen] = useState(false);
+  const [furnaceState, setFurnaceState] = useState<FurnaceState | null>(null);
+  const furnaceOpenRef = useRef(false);
+  const furnaceKeyRef = useRef<string | null>(null);
+  const furnaceStoreRef = useRef(new Map<string, FurnaceState>());
+
   const syncInventory = () => setInventory([...invRef.current]);
   const syncCraft = () => setCraftGrid([...craftRef.current]);
   const syncTable = () => setTableGrid([...tableRef.current]);
   const syncChest = () => setChestSlots([...chestRef.current]);
-  const anyMenuOpen = () => invOpenRef.current || craftOpenRef.current || chestOpenRef.current;
+  const anyMenuOpen = () => invOpenRef.current || craftOpenRef.current || chestOpenRef.current || furnaceOpenRef.current;
 
   // Merge a stack into the inventory, filling partial stacks first.
   const addStack = (type: ItemType, count: number) => {
@@ -327,6 +335,76 @@ export default function TerrainGame({
     if (document.pointerLockElement) document.exitPointerLock();
   };
 
+  const closeFurnace = () => {
+    const held = cursorRef.current;
+    if (held) addStack(held.type, held.count);
+    cursorRef.current = null;
+    setCursor(null);
+    furnaceOpenRef.current = false;
+    furnaceKeyRef.current = null;
+    setFurnaceOpen(false);
+    setFurnaceState(null);
+  };
+
+  const openFurnaceAt = (blockKey: string) => {
+    if (anyMenuOpen()) return;
+    let state = furnaceStoreRef.current.get(blockKey);
+    if (!state) {
+      state = { input: null, fuel: null, output: null, burnLeft: 0, burnTotal: 0, progress: 0, updatedAt: performance.now() };
+      furnaceStoreRef.current.set(blockKey, state);
+    }
+    furnaceKeyRef.current = blockKey;
+    furnaceOpenRef.current = true;
+    setFurnaceState({ ...state });
+    setFurnaceOpen(true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  };
+
+  const handleFurnaceSlotClick = (area: "inv" | "furnace", index: number, right: boolean) => {
+    if (area === "inv") {
+      handleSlotClick("inv", index, right);
+      return;
+    }
+    const key = furnaceKeyRef.current;
+    if (!key) return;
+    const state = furnaceStoreRef.current.get(key);
+    if (!state) return;
+    const names = ["input", "fuel", "output"] as const;
+    const name = names[index];
+    if (!name) return;
+    let slot = state[name];
+    let held = cursorRef.current;
+    if (name === "output") {
+      if (!slot || held) return;
+      const take = right ? 1 : slot.count;
+      held = { type: slot.type, count: take };
+      state.output = slot.count > take ? { type: slot.type, count: slot.count - take } : null;
+    } else if (!held) {
+      if (!slot) return;
+      const take = right ? Math.ceil(slot.count / 2) : slot.count;
+      held = { type: slot.type, count: take };
+      state[name] = slot.count > take ? { type: slot.type, count: slot.count - take } : null;
+    } else {
+      const allowed = name === "input" ? held.type === "coal_ore" : held.type === "stick" || held.type === "planks" || held.type === "wood";
+      if (!allowed) return;
+      if (!slot) {
+        const move = right ? 1 : held.count;
+        state[name] = { type: held.type, count: move };
+        held = held.count > move ? { type: held.type, count: held.count - move } : null;
+      } else if (slot.type === held.type && slot.count < maxStack(slot.type)) {
+        const move = right ? 1 : Math.min(held.count, maxStack(slot.type) - slot.count);
+        state[name] = { type: slot.type, count: slot.count + move };
+        held = held.count > move ? { type: held.type, count: held.count - move } : null;
+      } else if (!right) {
+        state[name] = held;
+        held = slot;
+      }
+    }
+    cursorRef.current = held;
+    setCursor(held);
+    setFurnaceState({ ...state });
+  };
+
   // Aimed block, updated by the render loop: drives E / the mobile button.
   const aimInfoRef = useRef<{ key: string; type: BlockType } | null>(null);
   const interact = () => {
@@ -338,6 +416,10 @@ export default function TerrainGame({
     }
     if (aim?.type === "crafting_table") {
       openCrafting();
+      return true;
+    }
+    if (aim?.type === "furnace") {
+      openFurnaceAt(aim.key);
       return true;
     }
     return false;
@@ -648,7 +730,7 @@ export default function TerrainGame({
       setFirstPerson(firstPersonView);
     };
     // A full voxel can be stepped onto; the model eases up visually below.
-    const STEP_TOLERANCE = 0.02; // only float noise: no automatic step-up onto higher blocks
+    const STEP_TOLERANCE = 0.52; // slabs and each half of a staircase are walkable
     const STEP_CLIMB_SPEED = 4.2; // blocks per second when the ground rises under a standing player
     type AttackMode = "punch" | "combo" | "kick";
     type PoseMap = Map<THREE.Object3D, THREE.Quaternion>;
@@ -953,6 +1035,13 @@ export default function TerrainGame({
             invOpenRef.current = true;
             setInvOpen(true);
           }
+        } else if (furnaceOpenRef.current) {
+          closeFurnace();
+          if (isT) {
+            openMenu();
+            invOpenRef.current = true;
+            setInvOpen(true);
+          }
         } else if (!isEscape) {
           if (isT) {
             openMenu();
@@ -961,7 +1050,7 @@ export default function TerrainGame({
           } else {
             // E only works while looking at a chest or crafting table.
             const aim = aimInfoRef.current;
-            if (aim?.type === "chest" || aim?.type === "crafting_table") {
+            if (aim?.type === "chest" || aim?.type === "crafting_table" || aim?.type === "furnace") {
               openMenu();
               interact();
             }
@@ -1144,14 +1233,21 @@ export default function TerrainGame({
       if (firstPersonView) character.rotation.y = cameraYaw + Math.PI;
 
       // Ladders: no gravity while touching one. Walk forward (or jump) to go
-      // up, crouch to go down, otherwise you simply hang on.
+      // up, crouch to go down, otherwise you simply hang on. The -0.6 check
+      // keeps you held for one block above the top rung, so you can climb out
+      // onto the ledge instead of getting stuck at the top.
       const onLadder =
+        world.isClimbable(character.position.x, character.position.y - 0.6, character.position.z) ||
         world.isClimbable(character.position.x, character.position.y + 0.2, character.position.z) ||
         world.isClimbable(character.position.x, character.position.y + 1.2, character.position.z);
+      const aboveLadderTop =
+        onLadder &&
+        !world.isClimbable(character.position.x, character.position.y + 0.2, character.position.z);
       if (onLadder) {
         verticalVelocity = 0;
         const crouching = Boolean(keys["ControlLeft"] || keys["KeyC"]);
-        if (speed > 0 || keys["Space"]) character.position.y += 3 * delta;
+        // Stop climbing once you are a block clear of the top rung.
+        if ((speed > 0 || keys["Space"]) && !aboveLadderTop) character.position.y += 3 * delta;
         else if (crouching) character.position.y -= 3 * delta;
       } else {
         verticalVelocity -= 12.5 * delta;
@@ -1173,7 +1269,9 @@ export default function TerrainGame({
           character.position.y += climb;
         } else {
           if (!grounded && verticalVelocity < -2.2) {
-            landingImpact = THREE.MathUtils.clamp(-verticalVelocity - 2.2, 0, 8);
+            // Higher falls hit harder: scale superlinearly with impact speed.
+            const impactSpeed = -verticalVelocity - 2.2;
+            landingImpact = THREE.MathUtils.clamp(impactSpeed * Math.pow(impactSpeed, 0.5), 0, 20);
             // Fall damage: half a heart per block above a ~3 block drop.
             const fallSpeed = -verticalVelocity;
             if (fallSpeed > 9.5) damagePlayer(Math.round((fallSpeed - 9.5) * 1.1));
@@ -1186,6 +1284,36 @@ export default function TerrainGame({
         grounded = false;
       }
       world.update(delta, character.position, addToInventory);
+      // Furnaces continue smelting whether their screen is open or closed.
+      for (const [key, furnace] of furnaceStoreRef.current) {
+        let remaining = Math.min(1, delta);
+        while (remaining > 0) {
+          const canOutput = !furnace.output || (furnace.output.type === "coal" && furnace.output.count < maxStack("coal"));
+          if (!furnace.input || furnace.input.type !== "coal_ore" || !canOutput) {
+            furnace.progress = 0;
+            break;
+          }
+          if (furnace.burnLeft <= 0) {
+            const fuel = furnace.fuel;
+            const duration = fuel?.type === "stick" ? 5 : fuel?.type === "planks" ? 10 : fuel?.type === "wood" ? 20 : 0;
+            if (!fuel || duration === 0) break;
+            furnace.fuel = fuel.count > 1 ? { type: fuel.type, count: fuel.count - 1 } : null;
+            furnace.burnLeft = duration;
+            furnace.burnTotal = duration;
+          }
+          const step = Math.min(remaining, furnace.burnLeft, 5 - furnace.progress);
+          furnace.burnLeft -= step;
+          furnace.progress += step;
+          remaining -= step;
+          if (furnace.progress >= 5) {
+            furnace.progress = 0;
+            furnace.input = furnace.input.count > 1 ? { type: "coal_ore", count: furnace.input.count - 1 } : null;
+            furnace.output = furnace.output ? { type: "coal", count: furnace.output.count + 1 } : { type: "coal", count: 1 };
+          }
+        }
+        furnace.updatedAt = performance.now();
+        if (furnaceOpenRef.current && furnaceKeyRef.current === key) setFurnaceState({ ...furnace });
+      }
 
       // Health: slow regeneration, and a respawn when it runs out. Online the
       // server handles both (so it also works while this tab is asleep).
@@ -1406,7 +1534,8 @@ export default function TerrainGame({
         const stiffness = isChest ? 23 : isHair ? 20 : isButt ? 40 : isAccessory ? 28 : 34;
         const damping = isChest ? 2.5 : isHair ? 3.1 : isButt ? 5.2 : isAccessory ? 6.4 : 7.2;
         if (isChest && landingImpact > 0) {
-          spring.velocityX += landingImpact * 0.16 * spring.weight;
+          spring.velocityX += landingImpact * 0.22 * spring.weight;
+          spring.velocityZ += landingImpact * 0.06 * spring.weight;
         }
         spring.velocityX += (targetX - spring.valueX) * stiffness * delta;
         spring.velocityZ += (targetZ - spring.valueZ) * stiffness * delta;
@@ -1414,7 +1543,7 @@ export default function TerrainGame({
         spring.velocityZ *= Math.exp(-damping * delta);
         spring.valueX += spring.velocityX * delta;
         spring.valueZ += spring.velocityZ * delta;
-        const maxAngle = isChest ? 0.2 : isHair ? 0.3 : isButt ? 0.12 : isAccessory ? 0.16 : 0.13;
+        const maxAngle = isChest ? 0.38 : isHair ? 0.3 : isButt ? 0.12 : isAccessory ? 0.16 : 0.13;
         spring.valueX = THREE.MathUtils.clamp(spring.valueX, -maxAngle, maxAngle);
         spring.valueZ = THREE.MathUtils.clamp(spring.valueZ, -maxAngle, maxAngle);
         // The walk-cycle bounce is applied directly at step frequency so the
@@ -1470,7 +1599,7 @@ export default function TerrainGame({
       const aimedType = aimed ? world.blockTypeAt(aimed) : null;
       aimInfoRef.current =
         aimed && aimedType ? { key: `${aimed[0]},${aimed[1]},${aimed[2]}`, type: aimedType } : null;
-      const aimedUsable = aimedType === "crafting_table" || aimedType === "chest";
+      const aimedUsable = aimedType === "crafting_table" || aimedType === "chest" || aimedType === "furnace";
       if (aimedUsable !== aimTableRef.current) {
         aimTableRef.current = aimedUsable;
         setAimTable(aimedUsable);
@@ -1515,6 +1644,15 @@ export default function TerrainGame({
               chestStoreRef.current.delete(chestKey);
             }
             if (chestKeyRef.current === chestKey) closeChest();
+          }
+          if (miningType === "furnace") {
+            const furnaceKey = `${miningBlock[0]},${miningBlock[1]},${miningBlock[2]}`;
+            const stored = furnaceStoreRef.current.get(furnaceKey);
+            if (stored) {
+              for (const slot of [stored.input, stored.fuel, stored.output]) if (slot) addStack(slot.type, slot.count);
+              furnaceStoreRef.current.delete(furnaceKey);
+            }
+            if (furnaceKeyRef.current === furnaceKey) closeFurnace();
           }
           world.removeBlock(miningBlock);
           miningBlock = null;
@@ -1712,6 +1850,18 @@ export default function TerrainGame({
         />
       ) : null}
 
+      {furnaceOpen && furnaceState ? (
+        <FurnacePanel
+          inventory={inventory}
+          furnace={furnaceState}
+          cursor={cursor}
+          cursorPos={cursorPos}
+          onSlotClick={handleFurnaceSlotClick}
+          onClose={closeFurnace}
+          onCursorMove={(x, y) => setCursorPos({ x, y })}
+        />
+      ) : null}
+
       <div className="hotbar-wrap">
         <div className="hp-bar" role="img" aria-label={`Health ${health} of ${MAX_HEALTH}`}>
           {Array.from({ length: 10 }, (_, index) => {
@@ -1749,8 +1899,8 @@ export default function TerrainGame({
               ? `${BLOCK_LABEL[inventory[selectedSlot]!.type]} — tap PLACE · hold screen to break`
               : "Hold the screen to break blocks · drag to look"
             : inventory[selectedSlot]
-              ? `${BLOCK_LABEL[inventory[selectedSlot]!.type]} — right-click to place · T inventory · E crafting`
-              : "Mine blocks to collect them · T inventory · E crafting"}
+              ? `${BLOCK_LABEL[inventory[selectedSlot]!.type]} — right-click to place · T inventory · E interact`
+              : "Mine blocks to collect them · T inventory · E interact"}
         </p>
       </div>
 
@@ -1765,7 +1915,7 @@ export default function TerrainGame({
         </button>
       ) : null}
 
-      {isTouch && !invOpen && !craftOpen && !chestOpen ? (
+      {isTouch && !invOpen && !craftOpen && !chestOpen && !furnaceOpen ? (
         <MobileControls
           onMove={(x, y) => {
             touchMoveRef.current = { x, y };
